@@ -1,44 +1,81 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
-	"os"
 )
+
+var pong = []byte("+PONG\r\n")
+
+type commandEvent struct {
+	command  []byte
+	response chan []byte
+}
 
 func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	fmt.Println("Logs from your program will appear here!")
 
-	l, err := net.Listen("tcp", "0.0.0.0:6379")
+	listener, err := net.Listen("tcp", "0.0.0.0:6379")
 	if err != nil {
-		fmt.Println("Failed to bind to port 6379")
-		os.Exit(1)
+		log.Fatal("Failed to bind to port 6379: ", err)
 	}
+	defer listener.Close()
+
+	events := make(chan commandEvent)
+	go runEventLoop(events)
 
 	for {
-		conn, err := l.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Println("Error accepting connection: ", err.Error())
-			os.Exit(1)
+			log.Println("Error accepting connection: ", err)
+			continue
 		}
-		go handleConn(conn)
+		go handleConn(conn, events)
 	}
 }
 
-func handleConn(conn net.Conn) {
+// runEventLoop serializes command execution. This is where shared Redis state
+// can be added when commands such as SET and GET are implemented.
+func runEventLoop(events <-chan commandEvent) {
+	for event := range events {
+		event.response <- execute(event.command)
+	}
+}
+
+func execute(_ []byte) []byte {
+	return pong
+}
+
+func handleConn(conn net.Conn, events chan<- commandEvent) {
 	defer conn.Close()
+
+	response := make(chan []byte)
+	buf := make([]byte, 1024)
+
 	for {
-		buf := make([]byte, 1024)
-		_, err := conn.Read(buf)
+		n, err := conn.Read(buf)
 		if err != nil {
-			fmt.Println("Error reading: ", err.Error())
-			os.Exit(1)
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				log.Println("Error reading: ", err)
+			}
+			return
 		}
-		_, err = conn.Write([]byte("+PONG\r\n"))
+
+		events <- commandEvent{
+			command:  buf[:n],
+			response: response,
+		}
+
+		_, err = conn.Write(<-response)
 		if err != nil {
-			fmt.Println("Error writing: ", err.Error())
-			os.Exit(1)
+			if !errors.Is(err, net.ErrClosed) {
+				log.Println("Error writing: ", err)
+			}
+			return
 		}
 	}
 }
