@@ -30,6 +30,14 @@ type redisValue struct {
 type commandEvent struct {
 	command  []byte
 	response chan []byte
+	blocked  *blockedRequest
+}
+
+type blockedRequest struct {
+	event commandEvent
+	keys  []string
+	done  bool
+	timer *time.Timer
 }
 
 func main() {
@@ -56,16 +64,37 @@ func main() {
 }
 
 // runEventLoop serializes command execution and owns the shared Redis state.
-func runEventLoop(events <-chan commandEvent) {
+func runEventLoop(events chan commandEvent) {
 	store := make(map[string]redisValue)
+	waiters := make(map[string][]*blockedRequest)
 
 	for event := range events {
-		event.response <- execute(event.command, store)
+		if event.blocked != nil {
+			expireBlockedRequest(event.blocked, waiters)
+			continue
+		}
+
+		arguments, err := parseRESPCommand(event.command)
+		if err == nil && len(arguments) > 0 && isCommand(arguments[0], "BLPOP") {
+			handleBlockingPop(event, arguments, store, waiters, events)
+			continue
+		}
+
+		response := execute(event.command, store)
+		event.response <- response
+		if err == nil && isListPush(arguments) {
+			wakeBlockedRequests(arguments[1], store, waiters)
+		}
 	}
 }
 
 func isCommand(value []byte, name string) bool {
 	return bytes.EqualFold(value, []byte(name))
+}
+
+func isListPush(arguments [][]byte) bool {
+	return len(arguments) > 1 &&
+		(isCommand(arguments[0], "RPUSH") || isCommand(arguments[0], "LPUSH"))
 }
 
 func execute(command []byte, store map[string]redisValue) []byte {
@@ -95,6 +124,127 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeLLen(arguments, store)
 	default:
 		return []byte("-ERR unknown command\r\n")
+	}
+}
+
+func handleBlockingPop(event commandEvent, arguments [][]byte, store map[string]redisValue, waiters map[string][]*blockedRequest, events chan commandEvent) {
+	if len(arguments) < 3 {
+		event.response <- []byte("-ERR wrong number of arguments for 'blpop' command\r\n")
+		return
+	}
+
+	timeout, err := strconv.ParseFloat(string(arguments[len(arguments)-1]), 64)
+	if err != nil || timeout < 0 {
+		event.response <- []byte("-ERR timeout is not a float or out of range\r\n")
+		return
+	}
+
+	keys := make([]string, 0, len(arguments)-2)
+	for _, argument := range arguments[1 : len(arguments)-1] {
+		key := string(argument)
+		keys = append(keys, key)
+
+		value, ok := store[key]
+		if !ok {
+			continue
+		}
+		if value.kind != listKind {
+			event.response <- wrongTypeError()
+			return
+		}
+		if len(value.list) == 0 {
+			delete(store, key)
+			continue
+		}
+
+		element, _ := popLeft(store, key)
+		event.response <- arrayResponse([][]byte{[]byte(key), element})
+		return
+	}
+
+	waiter := &blockedRequest{
+		event: event,
+		keys:  keys,
+	}
+	for _, key := range keys {
+		waiters[key] = append(waiters[key], waiter)
+	}
+	if timeout > 0 {
+		duration := time.Duration(timeout * float64(time.Second))
+		waiter.timer = time.AfterFunc(duration, func() {
+			events <- commandEvent{blocked: waiter}
+		})
+	}
+}
+
+func popLeft(store map[string]redisValue, key string) ([]byte, bool) {
+	value, ok := store[key]
+	if !ok || value.kind != listKind || len(value.list) == 0 {
+		return nil, false
+	}
+
+	element := value.list[0]
+	value.list = value.list[1:]
+	if len(value.list) == 0 {
+		delete(store, key)
+	} else {
+		store[key] = value
+	}
+	return element, true
+}
+
+func wakeBlockedRequests(keyArgument []byte, store map[string]redisValue, waiters map[string][]*blockedRequest) {
+	key := string(keyArgument)
+	for {
+		value, ok := store[key]
+		if !ok || value.kind != listKind || len(value.list) == 0 {
+			return
+		}
+
+		var waiter *blockedRequest
+		for _, candidate := range waiters[key] {
+			if !candidate.done {
+				waiter = candidate
+				break
+			}
+		}
+		if waiter == nil {
+			return
+		}
+
+		element, _ := popLeft(store, key)
+		waiter.done = true
+		if waiter.timer != nil {
+			waiter.timer.Stop()
+		}
+		removeBlockedRequest(waiter, waiters)
+		waiter.event.response <- arrayResponse([][]byte{[]byte(key), element})
+	}
+}
+
+func expireBlockedRequest(waiter *blockedRequest, waiters map[string][]*blockedRequest) {
+	if waiter.done {
+		return
+	}
+	waiter.done = true
+	removeBlockedRequest(waiter, waiters)
+	waiter.event.response <- []byte("*-1\r\n")
+}
+
+func removeBlockedRequest(waiter *blockedRequest, waiters map[string][]*blockedRequest) {
+	for _, key := range waiter.keys {
+		keyWaiters := waiters[key]
+		remaining := keyWaiters[:0]
+		for _, candidate := range keyWaiters {
+			if candidate != waiter {
+				remaining = append(remaining, candidate)
+			}
+		}
+		if len(remaining) == 0 {
+			delete(waiters, key)
+		} else {
+			waiters[key] = remaining
+		}
 	}
 }
 
