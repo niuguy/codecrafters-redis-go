@@ -164,7 +164,24 @@ func execute(command []byte, store map[string]redisValue) []byte {
 			return arrayResponse(nil)
 		}
 		return arrayResponse(value.list[start : stop+1])
-
+	case isCommand(arguments[0], "LPUSH"):
+		if len(arguments) < 3 {
+			return []byte("-ERR wrong number of arguments for 'lpush' command\r\n")
+		}
+		key := string(arguments[1])
+		value, ok := store[key]
+		if ok && value.kind != listKind {
+			return wrongTypeError()
+		}
+		if !ok {
+			// A missing key starts as an empty list, then receives the elements.
+			value.kind = listKind
+		}
+		for _, element := range arguments[2:] {
+			value.list = append(value.list, append([]byte(nil), element...))
+		}
+		store[key] = value
+		return integerResponse(len(value.list))
 	default:
 		return []byte("-ERR unknown command\r\n")
 	}
