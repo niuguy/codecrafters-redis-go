@@ -89,6 +89,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeLRange(arguments, store)
 	case isCommand(arguments[0], "LPUSH"):
 		return executeLPush(arguments, store)
+	case isCommand(arguments[0], "LLEN"):
+		return executeLLen(arguments, store)
 	default:
 		return []byte("-ERR unknown command\r\n")
 	}
@@ -212,6 +214,20 @@ func executeLPush(arguments [][]byte, store map[string]redisValue) []byte {
 	}
 	value.list = prependList(value.list, arguments[2:])
 	store[key] = value
+	return integerResponse(len(value.list))
+}
+
+func executeLLen(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 2 {
+		return []byte("-ERR wrong number of arguments for 'llen' command\r\n")
+	}
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return integerResponse(0)
+	}
+	if value.kind != listKind {
+		return wrongTypeError()
+	}
 	return integerResponse(len(value.list))
 }
 
