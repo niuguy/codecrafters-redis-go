@@ -89,6 +89,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeLRange(arguments, store)
 	case isCommand(arguments[0], "LPUSH"):
 		return executeLPush(arguments, store)
+	case isCommand(arguments[0], "LPOP"):
+		return executeLPop(arguments, store)
 	case isCommand(arguments[0], "LLEN"):
 		return executeLLen(arguments, store)
 	default:
@@ -215,6 +217,58 @@ func executeLPush(arguments [][]byte, store map[string]redisValue) []byte {
 	value.list = prependList(value.list, arguments[2:])
 	store[key] = value
 	return integerResponse(len(value.list))
+}
+
+func executeLPop(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 2 && len(arguments) != 3 {
+		return []byte("-ERR wrong number of arguments for 'lpop' command\r\n")
+	}
+
+	key := string(arguments[1])
+	value, ok := store[key]
+	if !ok {
+		if len(arguments) == 3 {
+			return []byte("*-1\r\n")
+		}
+		return []byte("$-1\r\n")
+	}
+	if value.kind != listKind {
+		return wrongTypeError()
+	}
+	if len(value.list) == 0 {
+		delete(store, key)
+		if len(arguments) == 3 {
+			return []byte("*-1\r\n")
+		}
+		return []byte("$-1\r\n")
+	}
+
+	if len(arguments) == 2 {
+		element := value.list[0]
+		value.list = value.list[1:]
+		if len(value.list) == 0 {
+			delete(store, key)
+		} else {
+			store[key] = value
+		}
+		return bulkString(element)
+	}
+
+	count, err := strconv.Atoi(string(arguments[2]))
+	if err != nil || count < 0 {
+		return []byte("-ERR value is not an integer or out of range\r\n")
+	}
+	if count > len(value.list) {
+		count = len(value.list)
+	}
+	popped := value.list[:count]
+	value.list = value.list[count:]
+	if len(value.list) == 0 {
+		delete(store, key)
+	} else {
+		store[key] = value
+	}
+	return arrayResponse(popped)
 }
 
 func executeLLen(arguments [][]byte, store map[string]redisValue) []byte {
