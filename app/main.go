@@ -75,115 +75,144 @@ func execute(command []byte, store map[string]redisValue) []byte {
 	}
 
 	switch {
-	case isCommand(arguments[0], "PING") && len(arguments) == 1:
-		return pong
-	case isCommand(arguments[0], "ECHO") && len(arguments) == 2:
-		return bulkString(arguments[1])
+	case isCommand(arguments[0], "PING"):
+		return executePing(arguments)
 	case isCommand(arguments[0], "ECHO"):
-		return []byte("-ERR wrong number of arguments for 'echo' command\r\n")
+		return executeEcho(arguments)
 	case isCommand(arguments[0], "SET"):
-		if len(arguments) < 3 {
-			return []byte("-ERR wrong number of arguments for 'set' command\r\n")
-		}
-		if len(arguments) > 4 {
-			var sleepTime time.Duration
-			if isCommand(arguments[3], "EX") {
-				sleepTimeNumber, _ := strconv.Atoi(string(arguments[4]))
-				sleepTime = time.Duration(sleepTimeNumber) * time.Second
-			} else if isCommand(arguments[3], "PX") {
-				sleepTimeNumber, _ := strconv.Atoi(string(arguments[4]))
-				sleepTime = time.Duration(sleepTimeNumber) * time.Millisecond
-
-			}
-
-			go func() {
-				time.Sleep(sleepTime)
-				delete(store, string(arguments[1]))
-			}()
-		}
-
-		store[string(arguments[1])] = redisValue{
-			kind:   stringKind,
-			string: append([]byte(nil), arguments[2]...),
-		}
-		return []byte("+OK\r\n")
+		return executeSet(arguments, store)
 	case isCommand(arguments[0], "GET"):
-		if len(arguments) != 2 {
-			return []byte("-ERR wrong number of arguments for 'get' command\r\n")
-		}
-		value, ok := store[string(arguments[1])]
-		if !ok {
-			return []byte("$-1\r\n")
-		}
-		if value.kind != stringKind {
-			return wrongTypeError()
-		}
-		return bulkString(value.string)
+		return executeGet(arguments, store)
 	case isCommand(arguments[0], "RPUSH"):
-		if len(arguments) < 3 {
-			return []byte("-ERR wrong number of arguments for 'rpush' command\r\n")
-		}
-
-		key := string(arguments[1])
-		value, ok := store[key]
-		if ok && value.kind != listKind {
-			return wrongTypeError()
-		}
-		if !ok {
-			// A missing key starts as an empty list, then receives the elements.
-			value.kind = listKind
-		}
-		for _, element := range arguments[2:] {
-			value.list = append(value.list, cloneBytes(element))
-		}
-		store[key] = value
-		return integerResponse(len(value.list))
+		return executeRPush(arguments, store)
 	case isCommand(arguments[0], "LRANGE"):
-		if len(arguments) != 4 {
-			return []byte("-ERR wrong number of arguments for 'lrange' command\r\n")
-		}
-
-		start, err := strconv.Atoi(string(arguments[2]))
-		if err != nil {
-			return []byte("-ERR value is not an integer or out of range\r\n")
-		}
-		stop, err := strconv.Atoi(string(arguments[3]))
-		if err != nil {
-			return []byte("-ERR value is not an integer or out of range\r\n")
-		}
-
-		value, ok := store[string(arguments[1])]
-		if !ok {
-			return arrayResponse(nil)
-		}
-		if value.kind != listKind {
-			return wrongTypeError()
-		}
-
-		start, stop, ok = listRange(start, stop, len(value.list))
-		if !ok {
-			return arrayResponse(nil)
-		}
-		return arrayResponse(value.list[start : stop+1])
+		return executeLRange(arguments, store)
 	case isCommand(arguments[0], "LPUSH"):
-		if len(arguments) < 3 {
-			return []byte("-ERR wrong number of arguments for 'lpush' command\r\n")
-		}
-		key := string(arguments[1])
-		value, ok := store[key]
-		if ok && value.kind != listKind {
-			return wrongTypeError()
-		}
-		if !ok {
-			// A missing key starts as an empty list, then receives the elements.
-			value.kind = listKind
-		}
-		value.list = prependList(value.list, arguments[2:])
-		store[key] = value
-		return integerResponse(len(value.list))
+		return executeLPush(arguments, store)
 	default:
 		return []byte("-ERR unknown command\r\n")
 	}
+}
+
+func executePing(arguments [][]byte) []byte {
+	if len(arguments) != 1 {
+		return []byte("-ERR wrong number of arguments for 'ping' command\r\n")
+	}
+	return pong
+}
+
+func executeEcho(arguments [][]byte) []byte {
+	if len(arguments) != 2 {
+		return []byte("-ERR wrong number of arguments for 'echo' command\r\n")
+	}
+	return bulkString(arguments[1])
+}
+
+func executeSet(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) < 3 {
+		return []byte("-ERR wrong number of arguments for 'set' command\r\n")
+	}
+	if len(arguments) > 4 {
+		var sleepTime time.Duration
+		if isCommand(arguments[3], "EX") {
+			sleepTimeNumber, _ := strconv.Atoi(string(arguments[4]))
+			sleepTime = time.Duration(sleepTimeNumber) * time.Second
+		} else if isCommand(arguments[3], "PX") {
+			sleepTimeNumber, _ := strconv.Atoi(string(arguments[4]))
+			sleepTime = time.Duration(sleepTimeNumber) * time.Millisecond
+		}
+
+		go func() {
+			time.Sleep(sleepTime)
+			delete(store, string(arguments[1]))
+		}()
+	}
+
+	store[string(arguments[1])] = redisValue{
+		kind:   stringKind,
+		string: cloneBytes(arguments[2]),
+	}
+	return []byte("+OK\r\n")
+}
+
+func executeGet(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 2 {
+		return []byte("-ERR wrong number of arguments for 'get' command\r\n")
+	}
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return []byte("$-1\r\n")
+	}
+	if value.kind != stringKind {
+		return wrongTypeError()
+	}
+	return bulkString(value.string)
+}
+
+func executeRPush(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) < 3 {
+		return []byte("-ERR wrong number of arguments for 'rpush' command\r\n")
+	}
+
+	key := string(arguments[1])
+	value, ok := store[key]
+	if ok && value.kind != listKind {
+		return wrongTypeError()
+	}
+	if !ok {
+		value.kind = listKind
+	}
+	for _, element := range arguments[2:] {
+		value.list = append(value.list, cloneBytes(element))
+	}
+	store[key] = value
+	return integerResponse(len(value.list))
+}
+
+func executeLRange(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 4 {
+		return []byte("-ERR wrong number of arguments for 'lrange' command\r\n")
+	}
+
+	start, err := strconv.Atoi(string(arguments[2]))
+	if err != nil {
+		return []byte("-ERR value is not an integer or out of range\r\n")
+	}
+	stop, err := strconv.Atoi(string(arguments[3]))
+	if err != nil {
+		return []byte("-ERR value is not an integer or out of range\r\n")
+	}
+
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return arrayResponse(nil)
+	}
+	if value.kind != listKind {
+		return wrongTypeError()
+	}
+
+	start, stop, ok = listRange(start, stop, len(value.list))
+	if !ok {
+		return arrayResponse(nil)
+	}
+	return arrayResponse(value.list[start : stop+1])
+}
+
+func executeLPush(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) < 3 {
+		return []byte("-ERR wrong number of arguments for 'lpush' command\r\n")
+	}
+	key := string(arguments[1])
+	value, ok := store[key]
+	if ok && value.kind != listKind {
+		return wrongTypeError()
+	}
+	if !ok {
+		value.kind = listKind
+	}
+	value.list = prependList(value.list, arguments[2:])
+	store[key] = value
+	return integerResponse(len(value.list))
 }
 
 func integerResponse(value int) []byte {
