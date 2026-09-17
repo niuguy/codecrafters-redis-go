@@ -13,6 +13,19 @@ import (
 
 var pong = []byte("+PONG\r\n")
 
+type valueKind uint8
+
+const (
+	stringKind valueKind = iota
+	listKind
+)
+
+type redisValue struct {
+	kind   valueKind
+	string []byte
+	list   [][]byte
+}
+
 type commandEvent struct {
 	command  []byte
 	response chan []byte
@@ -43,14 +56,14 @@ func main() {
 
 // runEventLoop serializes command execution and owns the shared Redis state.
 func runEventLoop(events <-chan commandEvent) {
-	store := make(map[string][]byte)
+	store := make(map[string]redisValue)
 
 	for event := range events {
 		event.response <- execute(event.command, store)
 	}
 }
 
-func execute(command []byte, store map[string][]byte) []byte {
+func execute(command []byte, store map[string]redisValue) []byte {
 	arguments, err := parseRESPCommand(command)
 	if err != nil || len(arguments) == 0 {
 		return []byte("-ERR protocol error\r\n")
@@ -84,7 +97,10 @@ func execute(command []byte, store map[string][]byte) []byte {
 			}()
 		}
 
-		store[string(arguments[1])] = append([]byte(nil), arguments[2]...)
+		store[string(arguments[1])] = redisValue{
+			kind:   stringKind,
+			string: append([]byte(nil), arguments[2]...),
+		}
 		return []byte("+OK\r\n")
 	case bytes.EqualFold(arguments[0], []byte("GET")):
 		if len(arguments) != 2 {
@@ -94,11 +110,45 @@ func execute(command []byte, store map[string][]byte) []byte {
 		if !ok {
 			return []byte("$-1\r\n")
 		}
-		return bulkString(value)
+		if value.kind != stringKind {
+			return wrongTypeError()
+		}
+		return bulkString(value.string)
+	case bytes.EqualFold(arguments[0], []byte("RPUSH")):
+		if len(arguments) < 3 {
+			return []byte("-ERR wrong number of arguments for 'rpush' command\r\n")
+		}
+
+		key := string(arguments[1])
+		value, ok := store[key]
+		if ok && value.kind != listKind {
+			return wrongTypeError()
+		}
+		if !ok {
+			// A missing key starts as an empty list, then receives the elements.
+			value.kind = listKind
+		}
+		for _, element := range arguments[2:] {
+			value.list = append(value.list, append([]byte(nil), element...))
+		}
+		store[key] = value
+		return integerResponse(len(value.list))
 
 	default:
 		return []byte("-ERR unknown command\r\n")
 	}
+}
+
+func integerResponse(value int) []byte {
+	response := make([]byte, 0, 24)
+	response = append(response, ':')
+	response = strconv.AppendInt(response, int64(value), 10)
+	response = append(response, '\r', '\n')
+	return response
+}
+
+func wrongTypeError() []byte {
+	return []byte("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
 }
 
 func bulkString(value []byte) []byte {
