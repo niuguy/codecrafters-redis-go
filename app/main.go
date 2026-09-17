@@ -63,6 +63,10 @@ func runEventLoop(events <-chan commandEvent) {
 	}
 }
 
+func isCommand(value []byte, name string) bool {
+	return bytes.EqualFold(value, []byte(name))
+}
+
 func execute(command []byte, store map[string]redisValue) []byte {
 	arguments, err := parseRESPCommand(command)
 	if err != nil || len(arguments) == 0 {
@@ -70,22 +74,22 @@ func execute(command []byte, store map[string]redisValue) []byte {
 	}
 
 	switch {
-	case bytes.EqualFold(arguments[0], []byte("PING")) && len(arguments) == 1:
+	case isCommand(arguments[0], "PING") && len(arguments) == 1:
 		return pong
-	case bytes.EqualFold(arguments[0], []byte("ECHO")) && len(arguments) == 2:
+	case isCommand(arguments[0], "ECHO") && len(arguments) == 2:
 		return bulkString(arguments[1])
-	case bytes.EqualFold(arguments[0], []byte("ECHO")):
+	case isCommand(arguments[0], "ECHO"):
 		return []byte("-ERR wrong number of arguments for 'echo' command\r\n")
-	case bytes.EqualFold(arguments[0], []byte("SET")):
+	case isCommand(arguments[0], "SET"):
 		if len(arguments) < 3 {
 			return []byte("-ERR wrong number of arguments for 'set' command\r\n")
 		}
 		if len(arguments) > 4 {
 			var sleepTime time.Duration
-			if bytes.EqualFold(arguments[3], []byte("EX")) {
+			if isCommand(arguments[3], "EX") {
 				sleepTimeNumber, _ := strconv.Atoi(string(arguments[4]))
 				sleepTime = time.Duration(sleepTimeNumber) * time.Second
-			} else if bytes.EqualFold(arguments[3], []byte("PX")) {
+			} else if isCommand(arguments[3], "PX") {
 				sleepTimeNumber, _ := strconv.Atoi(string(arguments[4]))
 				sleepTime = time.Duration(sleepTimeNumber) * time.Millisecond
 
@@ -102,7 +106,7 @@ func execute(command []byte, store map[string]redisValue) []byte {
 			string: append([]byte(nil), arguments[2]...),
 		}
 		return []byte("+OK\r\n")
-	case bytes.EqualFold(arguments[0], []byte("GET")):
+	case isCommand(arguments[0], "GET"):
 		if len(arguments) != 2 {
 			return []byte("-ERR wrong number of arguments for 'get' command\r\n")
 		}
@@ -114,7 +118,7 @@ func execute(command []byte, store map[string]redisValue) []byte {
 			return wrongTypeError()
 		}
 		return bulkString(value.string)
-	case bytes.EqualFold(arguments[0], []byte("RPUSH")):
+	case isCommand(arguments[0], "RPUSH"):
 		if len(arguments) < 3 {
 			return []byte("-ERR wrong number of arguments for 'rpush' command\r\n")
 		}
@@ -133,7 +137,7 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		}
 		store[key] = value
 		return integerResponse(len(value.list))
-	case bytes.EqualFold(arguments[0], []byte("LRANGE")):
+	case isCommand(arguments[0], "LRANGE"):
 		if len(arguments) != 4 {
 			return []byte("-ERR wrong number of arguments for 'lrange' command\r\n")
 		}
