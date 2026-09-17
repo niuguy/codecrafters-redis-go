@@ -133,6 +133,33 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		}
 		store[key] = value
 		return integerResponse(len(value.list))
+	case bytes.EqualFold(arguments[0], []byte("LRANGE")):
+		if len(arguments) != 4 {
+			return []byte("-ERR wrong number of arguments for 'lrange' command\r\n")
+		}
+
+		start, err := strconv.Atoi(string(arguments[2]))
+		if err != nil {
+			return []byte("-ERR value is not an integer or out of range\r\n")
+		}
+		stop, err := strconv.Atoi(string(arguments[3]))
+		if err != nil {
+			return []byte("-ERR value is not an integer or out of range\r\n")
+		}
+
+		value, ok := store[string(arguments[1])]
+		if !ok {
+			return arrayResponse(nil)
+		}
+		if value.kind != listKind {
+			return wrongTypeError()
+		}
+
+		start, stop, ok = listRange(start, stop, len(value.list))
+		if !ok {
+			return arrayResponse(nil)
+		}
+		return arrayResponse(value.list[start : stop+1])
 
 	default:
 		return []byte("-ERR unknown command\r\n")
@@ -145,6 +172,36 @@ func integerResponse(value int) []byte {
 	response = strconv.AppendInt(response, int64(value), 10)
 	response = append(response, '\r', '\n')
 	return response
+}
+
+func arrayResponse(values [][]byte) []byte {
+	response := make([]byte, 0, 32)
+	response = append(response, '*')
+	response = strconv.AppendInt(response, int64(len(values)), 10)
+	response = append(response, '\r', '\n')
+	for _, value := range values {
+		response = append(response, bulkString(value)...)
+	}
+	return response
+}
+
+func listRange(start, stop, length int) (int, int, bool) {
+	if start < 0 {
+		start = length + start
+	}
+	if stop < 0 {
+		stop = length + stop
+	}
+	if start < 0 {
+		start = 0
+	}
+	if stop < 0 || start >= length || start > stop {
+		return 0, 0, false
+	}
+	if stop >= length {
+		stop = length - 1
+	}
+	return start, stop, true
 }
 
 func wrongTypeError() []byte {
