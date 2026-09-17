@@ -40,15 +40,16 @@ func main() {
 	}
 }
 
-// runEventLoop serializes command execution. This is where shared Redis state
-// can be added when commands such as SET and GET are implemented.
+// runEventLoop serializes command execution and owns the shared Redis state.
 func runEventLoop(events <-chan commandEvent) {
+	store := make(map[string][]byte)
+
 	for event := range events {
-		event.response <- execute(event.command)
+		event.response <- execute(event.command, store)
 	}
 }
 
-func execute(command []byte) []byte {
+func execute(command []byte, store map[string][]byte) []byte {
 	arguments, err := parseRESPCommand(command)
 	if err != nil || len(arguments) == 0 {
 		return []byte("-ERR protocol error\r\n")
@@ -61,6 +62,22 @@ func execute(command []byte) []byte {
 		return bulkString(arguments[1])
 	case bytes.EqualFold(arguments[0], []byte("ECHO")):
 		return []byte("-ERR wrong number of arguments for 'echo' command\r\n")
+	case bytes.EqualFold(arguments[0], []byte("SET")):
+		if len(arguments) != 3 {
+			return []byte("-ERR wrong number of arguments for 'set' command\r\n")
+		}
+		store[string(arguments[1])] = append([]byte(nil), arguments[2]...)
+		return []byte("+OK\r\n")
+	case bytes.EqualFold(arguments[0], []byte("GET")):
+		if len(arguments) != 2 {
+			return []byte("-ERR wrong number of arguments for 'get' command\r\n")
+		}
+		value, ok := store[string(arguments[1])]
+		if !ok {
+			return []byte("$-1\r\n")
+		}
+		return bulkString(value)
+
 	default:
 		return []byte("-ERR unknown command\r\n")
 	}
