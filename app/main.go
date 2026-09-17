@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -133,7 +134,7 @@ func execute(command []byte, store map[string]redisValue) []byte {
 			value.kind = listKind
 		}
 		for _, element := range arguments[2:] {
-			value.list = append(value.list, append([]byte(nil), element...))
+			value.list = append(value.list, cloneBytes(element))
 		}
 		store[key] = value
 		return integerResponse(len(value.list))
@@ -177,9 +178,7 @@ func execute(command []byte, store map[string]redisValue) []byte {
 			// A missing key starts as an empty list, then receives the elements.
 			value.kind = listKind
 		}
-		for _, element := range arguments[2:] {
-			value.list = append(value.list, append([]byte(nil), element...))
-		}
+		value.list = prependList(value.list, arguments[2:])
 		store[key] = value
 		return integerResponse(len(value.list))
 	default:
@@ -193,6 +192,18 @@ func integerResponse(value int) []byte {
 	response = strconv.AppendInt(response, int64(value), 10)
 	response = append(response, '\r', '\n')
 	return response
+}
+
+func cloneBytes(value []byte) []byte {
+	return append([]byte(nil), value...)
+}
+
+func prependList(existing, values [][]byte) [][]byte {
+	result := make([][]byte, 0, len(existing)+len(values))
+	for _, value := range slices.Backward(values) {
+		result = append(result, cloneBytes(value))
+	}
+	return append(result, existing...)
 }
 
 func arrayResponse(values [][]byte) []byte {
