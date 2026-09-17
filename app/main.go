@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"time"
 )
 
 var pong = []byte("+PONG\r\n")
@@ -63,9 +64,26 @@ func execute(command []byte, store map[string][]byte) []byte {
 	case bytes.EqualFold(arguments[0], []byte("ECHO")):
 		return []byte("-ERR wrong number of arguments for 'echo' command\r\n")
 	case bytes.EqualFold(arguments[0], []byte("SET")):
-		if len(arguments) != 3 {
+		if len(arguments) < 3 {
 			return []byte("-ERR wrong number of arguments for 'set' command\r\n")
 		}
+		if len(arguments) > 4 {
+			var sleepTime time.Duration
+			if bytes.EqualFold(arguments[3], []byte("EX")) {
+				sleepTimeNumber, _ := strconv.Atoi(string(arguments[4]))
+				sleepTime = time.Duration(sleepTimeNumber) * time.Second
+			} else if bytes.EqualFold(arguments[3], []byte("PX")) {
+				sleepTimeNumber, _ := strconv.Atoi(string(arguments[4]))
+				sleepTime = time.Duration(sleepTimeNumber) * time.Millisecond
+
+			}
+
+			go func() {
+				time.Sleep(sleepTime)
+				delete(store, string(arguments[1]))
+			}()
+		}
+
 		store[string(arguments[1])] = append([]byte(nil), arguments[2]...)
 		return []byte("+OK\r\n")
 	case bytes.EqualFold(arguments[0], []byte("GET")):
