@@ -19,7 +19,29 @@ type valueKind uint8
 const (
 	stringKind valueKind = iota
 	listKind
+	setKind
+	zsetKind
+	hashKind
+	streamKind
+	vectorSetKind
 )
+
+var valueKindNames = [...]string{
+	"string",
+	"list",
+	"set",
+	"zset",
+	"hash",
+	"stream",
+	"vectorset",
+}
+
+func (kind valueKind) String() string {
+	if int(kind) >= len(valueKindNames) {
+		return "unknown"
+	}
+	return valueKindNames[kind]
+}
 
 type redisValue struct {
 	kind   valueKind
@@ -122,6 +144,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeLPop(arguments, store)
 	case isCommand(arguments[0], "LLEN"):
 		return executeLLen(arguments, store)
+	case isCommand(arguments[0], "TYPE"):
+		return executeType(arguments, store)
 	default:
 		return []byte("-ERR unknown command\r\n")
 	}
@@ -433,6 +457,25 @@ func executeLLen(arguments [][]byte, store map[string]redisValue) []byte {
 		return wrongTypeError()
 	}
 	return integerResponse(len(value.list))
+}
+
+func executeType(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 2 {
+		return []byte("-ERR wrong number of arguments for 'type' command\r\n")
+	}
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return simpleString("none")
+	}
+	return simpleString(value.kind.String())
+}
+
+func simpleString(value string) []byte {
+	response := make([]byte, 0, len(value)+3)
+	response = append(response, '+')
+	response = append(response, value...)
+	response = append(response, '\r', '\n')
+	return response
 }
 
 func integerResponse(value int) []byte {
