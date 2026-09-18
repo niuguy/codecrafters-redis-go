@@ -159,6 +159,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeType(arguments, store)
 	case isCommand(arguments[0], "XADD"):
 		return executeXAdd(arguments, store)
+	case isCommand(arguments[0], "XRANGE"):
+		return executeXRange(arguments, store)
 	default:
 		return []byte("-ERR unknown command\r\n")
 	}
@@ -579,6 +581,105 @@ func (id streamID) String() string {
 	return strconv.FormatUint(id.milliseconds, 10) + "-" + strconv.FormatUint(id.sequence, 10)
 }
 
+func executeXRange(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 4 && len(arguments) != 6 {
+		return []byte("-ERR wrong number of arguments for 'xrange' command\r\n")
+	}
+
+	start, err := parseRangeID(arguments[2], false)
+	if err != nil {
+		return []byte("-ERR invalid stream ID specified as stream command argument\r\n")
+	}
+	end, err := parseRangeID(arguments[3], true)
+	if err != nil {
+		return []byte("-ERR invalid stream ID specified as stream command argument\r\n")
+	}
+
+	count := -1
+	if len(arguments) == 6 {
+		if !isCommand(arguments[4], "COUNT") {
+			return []byte("-ERR syntax error\r\n")
+		}
+		count, err = strconv.Atoi(string(arguments[5]))
+		if err != nil || count < 0 {
+			return []byte("-ERR value is not an integer or out of range\r\n")
+		}
+		if count == 0 {
+			return streamEntriesResponse(nil)
+		}
+	}
+
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return streamEntriesResponse(nil)
+	}
+	if value.kind != streamKind {
+		return wrongTypeError()
+	}
+
+	entries := make([]streamEntry, 0)
+	for _, entry := range value.stream {
+		if entry.id.lessThan(start) || entry.id.greaterThan(end) {
+			continue
+		}
+		entries = append(entries, entry)
+		if count >= 0 && len(entries) == count {
+			break
+		}
+	}
+	return streamEntriesResponse(entries)
+}
+
+func parseRangeID(raw []byte, end bool) (streamID, error) {
+	if bytes.Equal(raw, []byte("-")) {
+		return streamID{}, nil
+	}
+	if bytes.Equal(raw, []byte("+")) {
+		return streamID{milliseconds: ^uint64(0), sequence: ^uint64(0)}, nil
+	}
+
+	dash := bytes.IndexByte(raw, '-')
+	if dash == -1 {
+		milliseconds, err := strconv.ParseUint(string(raw), 10, 64)
+		if err != nil {
+			return streamID{}, err
+		}
+		if end {
+			return streamID{milliseconds: milliseconds, sequence: ^uint64(0)}, nil
+		}
+		return streamID{milliseconds: milliseconds}, nil
+	}
+	if dash <= 0 || dash == len(raw)-1 {
+		return streamID{}, errors.New("invalid stream ID")
+	}
+	milliseconds, err := strconv.ParseUint(string(raw[:dash]), 10, 64)
+	if err != nil {
+		return streamID{}, err
+	}
+	sequence, err := strconv.ParseUint(string(raw[dash+1:]), 10, 64)
+	if err != nil {
+		return streamID{}, err
+	}
+	return streamID{milliseconds: milliseconds, sequence: sequence}, nil
+}
+
+func (id streamID) lessThan(other streamID) bool {
+	return other.greaterThan(id)
+}
+
+func streamEntriesResponse(entries []streamEntry) []byte {
+	response := appendArrayHeader(nil, len(entries))
+	for _, entry := range entries {
+		response = appendArrayHeader(response, 2)
+		response = append(response, bulkString([]byte(entry.id.String()))...)
+		response = appendArrayHeader(response, len(entry.fields))
+		for _, field := range entry.fields {
+			response = append(response, bulkString(field)...)
+		}
+	}
+	return response
+}
+
 func integerResponse(value int) []byte {
 	response := make([]byte, 0, 24)
 	response = append(response, ':')
@@ -601,13 +702,17 @@ func prependList(existing, values [][]byte) [][]byte {
 
 func arrayResponse(values [][]byte) []byte {
 	response := make([]byte, 0, 32)
-	response = append(response, '*')
-	response = strconv.AppendInt(response, int64(len(values)), 10)
-	response = append(response, '\r', '\n')
+	response = appendArrayHeader(response, len(values))
 	for _, value := range values {
 		response = append(response, bulkString(value)...)
 	}
 	return response
+}
+
+func appendArrayHeader(response []byte, count int) []byte {
+	response = append(response, '*')
+	response = strconv.AppendInt(response, int64(count), 10)
+	return append(response, '\r', '\n')
 }
 
 func listRange(start, stop, length int) (int, int, bool) {
