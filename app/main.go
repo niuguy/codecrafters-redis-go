@@ -71,6 +71,7 @@ type commandEvent struct {
 type clientState struct {
 	inMulti bool
 	queue   [][]byte
+	watched map[string]uint64
 }
 
 type blockedRequest struct {
@@ -114,6 +115,7 @@ func main() {
 // runEventLoop serializes command execution and owns the shared Redis state.
 func runEventLoop(events chan commandEvent) {
 	store := make(map[string]redisValue)
+	versions := make(map[string]uint64)
 	waiters := make(map[string][]*blockedRequest)
 	streamWaiters := make(map[string][]*blockedStreamRequest)
 
@@ -129,12 +131,20 @@ func runEventLoop(events chan commandEvent) {
 
 		arguments, err := parseRESPCommand(event.command)
 		if err == nil && event.client != nil {
+			if isCommand(arguments[0], "WATCH") {
+				event.response <- watchKeys(arguments, event.client, versions)
+				continue
+			}
+			if isCommand(arguments[0], "UNWATCH") {
+				event.response <- unwatchKeys(arguments, event.client)
+				continue
+			}
 			if isCommand(arguments[0], "MULTI") {
 				event.response <- beginTransaction(event.client)
 				continue
 			}
 			if isCommand(arguments[0], "EXEC") {
-				event.response <- executeTransaction(event.client, store, waiters, streamWaiters)
+				event.response <- executeTransaction(event.client, store, versions, waiters, streamWaiters)
 				continue
 			}
 			if isCommand(arguments[0], "DISCARD") {
@@ -157,10 +167,11 @@ func runEventLoop(events chan commandEvent) {
 		}
 
 		response := execute(event.command, store)
-		event.response <- response
 		if err == nil {
+			touchModifiedKeys(arguments, response, versions)
 			wakeAfterCommand(arguments, store, waiters, streamWaiters)
 		}
+		event.response <- response
 	}
 }
 
@@ -173,32 +184,80 @@ func beginTransaction(client *clientState) []byte {
 	return []byte("+OK\r\n")
 }
 
+func watchKeys(arguments [][]byte, client *clientState, versions map[string]uint64) []byte {
+	if client.inMulti {
+		return []byte("-ERR WATCH inside MULTI is not allowed\r\n")
+	}
+	if len(arguments) < 2 {
+		return []byte("-ERR wrong number of arguments for 'watch' command\r\n")
+	}
+	if client.watched == nil {
+		client.watched = make(map[string]uint64)
+	}
+	for _, argument := range arguments[1:] {
+		key := string(argument)
+		client.watched[key] = versions[key]
+	}
+	return []byte("+OK\r\n")
+}
+
+func unwatchKeys(arguments [][]byte, client *clientState) []byte {
+	if client.inMulti {
+		return []byte("-ERR UNWATCH inside MULTI is not allowed\r\n")
+	}
+	if len(arguments) != 1 {
+		return []byte("-ERR wrong number of arguments for 'unwatch' command\r\n")
+	}
+	client.watched = nil
+	return []byte("+OK\r\n")
+}
+
 func discardTransaction(client *clientState) []byte {
 	if !client.inMulti {
 		return []byte("-ERR DISCARD without MULTI\r\n")
 	}
 	client.inMulti = false
 	client.queue = nil
+	client.watched = nil
 	return []byte("+OK\r\n")
 }
 
-func executeTransaction(client *clientState, store map[string]redisValue, waiters map[string][]*blockedRequest, streamWaiters map[string][]*blockedStreamRequest) []byte {
+func executeTransaction(client *clientState, store map[string]redisValue, versions map[string]uint64, waiters map[string][]*blockedRequest, streamWaiters map[string][]*blockedStreamRequest) []byte {
 	if !client.inMulti {
 		return []byte("-ERR EXEC without MULTI\r\n")
+	}
+
+	if watchedKeyChanged(client.watched, versions) {
+		client.inMulti = false
+		client.queue = nil
+		client.watched = nil
+		return []byte("*-1\r\n")
 	}
 
 	queued := client.queue
 	client.inMulti = false
 	client.queue = nil
+	client.watched = nil
 	replies := make([][]byte, 0, len(queued))
 	for _, command := range queued {
 		arguments, err := parseRESPCommand(command)
-		replies = append(replies, execute(command, store))
+		response := execute(command, store)
+		replies = append(replies, response)
 		if err == nil {
+			touchModifiedKeys(arguments, response, versions)
 			wakeAfterCommand(arguments, store, waiters, streamWaiters)
 		}
 	}
 	return rawArrayResponse(replies)
+}
+
+func watchedKeyChanged(watched, versions map[string]uint64) bool {
+	for key, version := range watched {
+		if versions[key] != version {
+			return true
+		}
+	}
+	return false
 }
 
 func wakeAfterCommand(arguments [][]byte, store map[string]redisValue, waiters map[string][]*blockedRequest, streamWaiters map[string][]*blockedStreamRequest) {
@@ -207,6 +266,29 @@ func wakeAfterCommand(arguments [][]byte, store map[string]redisValue, waiters m
 	}
 	if len(arguments) > 1 && isCommand(arguments[0], "XADD") {
 		wakeBlockedStreamRequests(arguments[1], store, streamWaiters)
+	}
+}
+
+func touchModifiedKeys(arguments [][]byte, response []byte, versions map[string]uint64) {
+	if len(arguments) < 2 || len(response) == 0 || response[0] == '-' {
+		return
+	}
+
+	command := arguments[0]
+	key := string(arguments[1])
+	switch {
+	case isCommand(command, "SET"),
+		isCommand(command, "INCR"),
+		isCommand(command, "RPUSH"),
+		isCommand(command, "LPUSH"),
+		isCommand(command, "XADD"):
+		versions[key]++
+	case isCommand(command, "LPOP"):
+		if !bytes.Equal(response, []byte("$-1\r\n")) &&
+			!bytes.Equal(response, []byte("*-1\r\n")) &&
+			!bytes.Equal(response, []byte("*0\r\n")) {
+			versions[key]++
+		}
 	}
 }
 
