@@ -61,14 +61,23 @@ type streamID struct {
 }
 
 type commandEvent struct {
-	command  []byte
-	response chan []byte
-	blocked  *blockedRequest
+	command       []byte
+	response      chan []byte
+	blocked       *blockedRequest
+	blockedStream *blockedStreamRequest
 }
 
 type blockedRequest struct {
 	event commandEvent
 	keys  []string
+	done  bool
+	timer *time.Timer
+}
+
+type blockedStreamRequest struct {
+	event commandEvent
+	keys  []string
+	ids   []streamID
 	done  bool
 	timer *time.Timer
 }
@@ -100,10 +109,15 @@ func main() {
 func runEventLoop(events chan commandEvent) {
 	store := make(map[string]redisValue)
 	waiters := make(map[string][]*blockedRequest)
+	streamWaiters := make(map[string][]*blockedStreamRequest)
 
 	for event := range events {
 		if event.blocked != nil {
 			expireBlockedRequest(event.blocked, waiters)
+			continue
+		}
+		if event.blockedStream != nil {
+			expireBlockedStreamRequest(event.blockedStream, streamWaiters)
 			continue
 		}
 
@@ -112,11 +126,18 @@ func runEventLoop(events chan commandEvent) {
 			handleBlockingPop(event, arguments, store, waiters, events)
 			continue
 		}
+		if err == nil && len(arguments) > 0 && isBlockingXRead(arguments) {
+			handleBlockingXRead(event, arguments, store, streamWaiters, events)
+			continue
+		}
 
 		response := execute(event.command, store)
 		event.response <- response
 		if err == nil && isListPush(arguments) {
 			wakeBlockedRequests(arguments[1], store, waiters)
+		}
+		if err == nil && len(arguments) > 1 && isCommand(arguments[0], "XADD") {
+			wakeBlockedStreamRequests(arguments[1], store, streamWaiters)
 		}
 	}
 }
@@ -215,6 +236,124 @@ func handleBlockingPop(event commandEvent, arguments [][]byte, store map[string]
 		waiter.timer = time.AfterFunc(duration, func() {
 			events <- commandEvent{blocked: waiter}
 		})
+	}
+}
+
+func isBlockingXRead(arguments [][]byte) bool {
+	return len(arguments) >= 2 &&
+		isCommand(arguments[0], "XREAD") &&
+		isCommand(arguments[1], "BLOCK")
+}
+
+func handleBlockingXRead(event commandEvent, arguments [][]byte, store map[string]redisValue, waiters map[string][]*blockedStreamRequest, events chan commandEvent) {
+	if len(arguments) < 6 || !isCommand(arguments[3], "STREAMS") || (len(arguments)-4)%2 != 0 {
+		event.response <- []byte("-ERR syntax error\r\n")
+		return
+	}
+
+	timeout, err := strconv.ParseInt(string(arguments[2]), 10, 64)
+	if err != nil || timeout < 0 {
+		event.response <- []byte("-ERR timeout is not an integer or out of range\r\n")
+		return
+	}
+
+	streamCount := (len(arguments) - 4) / 2
+	keys := make([]string, streamCount)
+	ids := make([]streamID, streamCount)
+	for i, argument := range arguments[4 : 4+streamCount] {
+		keys[i] = string(argument)
+		value, exists := store[keys[i]]
+		if exists && value.kind != streamKind {
+			event.response <- wrongTypeError()
+			return
+		}
+		ids[i], err = readStartID(arguments[4+streamCount+i], value, exists)
+		if err != nil {
+			event.response <- []byte("-ERR invalid stream ID specified as stream command argument\r\n")
+			return
+		}
+	}
+
+	if results := collectStreamReadResults(keys, ids, store); len(results) > 0 {
+		event.response <- streamReadResponse(results)
+		return
+	}
+
+	waiter := &blockedStreamRequest{event: event, keys: keys, ids: ids}
+	for _, key := range keys {
+		waiters[key] = append(waiters[key], waiter)
+	}
+	if timeout > 0 {
+		waiter.timer = time.AfterFunc(time.Duration(timeout)*time.Millisecond, func() {
+			events <- commandEvent{blockedStream: waiter}
+		})
+	}
+}
+
+func collectStreamReadResults(keys []string, ids []streamID, store map[string]redisValue) []streamReadResult {
+	results := make([]streamReadResult, 0, len(keys))
+	for i, key := range keys {
+		value, exists := store[key]
+		if !exists {
+			continue
+		}
+
+		entries := make([]streamEntry, 0)
+		for _, entry := range value.stream {
+			if entry.id.greaterThan(ids[i]) {
+				entries = append(entries, entry)
+			}
+		}
+		if len(entries) > 0 {
+			results = append(results, streamReadResult{key: key, entries: entries})
+		}
+	}
+	return results
+}
+
+func wakeBlockedStreamRequests(keyArgument []byte, store map[string]redisValue, waiters map[string][]*blockedStreamRequest) {
+	key := string(keyArgument)
+	for _, waiter := range append([]*blockedStreamRequest(nil), waiters[key]...) {
+		if waiter.done {
+			continue
+		}
+		results := collectStreamReadResults(waiter.keys, waiter.ids, store)
+		if len(results) == 0 {
+			continue
+		}
+
+		waiter.done = true
+		if waiter.timer != nil {
+			waiter.timer.Stop()
+		}
+		removeBlockedStreamRequest(waiter, waiters)
+		waiter.event.response <- streamReadResponse(results)
+	}
+}
+
+func expireBlockedStreamRequest(waiter *blockedStreamRequest, waiters map[string][]*blockedStreamRequest) {
+	if waiter.done {
+		return
+	}
+	waiter.done = true
+	removeBlockedStreamRequest(waiter, waiters)
+	waiter.event.response <- []byte("*-1\r\n")
+}
+
+func removeBlockedStreamRequest(waiter *blockedStreamRequest, waiters map[string][]*blockedStreamRequest) {
+	for _, key := range waiter.keys {
+		keyWaiters := waiters[key]
+		remaining := keyWaiters[:0]
+		for _, candidate := range keyWaiters {
+			if candidate != waiter {
+				remaining = append(remaining, candidate)
+			}
+		}
+		if len(remaining) == 0 {
+			delete(waiters, key)
+		} else {
+			waiters[key] = remaining
+		}
 	}
 }
 
