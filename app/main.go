@@ -47,6 +47,17 @@ type redisValue struct {
 	kind   valueKind
 	string []byte
 	list   [][]byte
+	stream []streamEntry
+}
+
+type streamEntry struct {
+	id     streamID
+	fields [][]byte
+}
+
+type streamID struct {
+	milliseconds uint64
+	sequence     uint64
 }
 
 type commandEvent struct {
@@ -146,6 +157,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeLLen(arguments, store)
 	case isCommand(arguments[0], "TYPE"):
 		return executeType(arguments, store)
+	case isCommand(arguments[0], "XADD"):
+		return executeXAdd(arguments, store)
 	default:
 		return []byte("-ERR unknown command\r\n")
 	}
@@ -476,6 +489,94 @@ func simpleString(value string) []byte {
 	response = append(response, value...)
 	response = append(response, '\r', '\n')
 	return response
+}
+
+func executeXAdd(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) < 5 || (len(arguments)-3)%2 != 0 {
+		return []byte("-ERR wrong number of arguments for 'xadd' command\r\n")
+	}
+
+	key := string(arguments[1])
+	value, ok := store[key]
+	if ok && value.kind != streamKind {
+		return wrongTypeError()
+	}
+
+	var lastID streamID
+	if len(value.stream) > 0 {
+		lastID = value.stream[len(value.stream)-1].id
+	}
+	id, err := nextStreamID(arguments[2], lastID)
+	if err != nil {
+		return []byte(err.Error() + "\r\n")
+	}
+
+	entry := streamEntry{id: id, fields: make([][]byte, 0, len(arguments)-3)}
+	for _, field := range arguments[3:] {
+		entry.fields = append(entry.fields, cloneBytes(field))
+	}
+	value.kind = streamKind
+	value.stream = append(value.stream, entry)
+	store[key] = value
+	return bulkString([]byte(id.String()))
+}
+
+func nextStreamID(raw []byte, last streamID) (streamID, error) {
+	if bytes.Equal(raw, []byte("*")) {
+		return generatedStreamID(last), nil
+	}
+
+	dash := bytes.IndexByte(raw, '-')
+	if dash <= 0 || dash == len(raw)-1 {
+		return streamID{}, errors.New("-ERR Invalid stream ID specified as stream command argument")
+	}
+	milliseconds, err := strconv.ParseUint(string(raw[:dash]), 10, 64)
+	if err != nil {
+		return streamID{}, errors.New("-ERR Invalid stream ID specified as stream command argument")
+	}
+
+	sequencePart := raw[dash+1:]
+	var sequence uint64
+	if bytes.Equal(sequencePart, []byte("*")) {
+		if milliseconds == last.milliseconds {
+			sequence = last.sequence + 1
+		}
+	} else {
+		sequence, err = strconv.ParseUint(string(sequencePart), 10, 64)
+		if err != nil {
+			return streamID{}, errors.New("-ERR Invalid stream ID specified as stream command argument")
+		}
+	}
+
+	id := streamID{milliseconds: milliseconds, sequence: sequence}
+	if id.milliseconds == 0 && id.sequence == 0 {
+		return streamID{}, errors.New("-ERR The ID specified in XADD must be greater than 0-0")
+	}
+	if !id.greaterThan(last) {
+		return streamID{}, errors.New("-ERR The ID specified in XADD is equal or smaller than the target stream top item")
+	}
+	return id, nil
+}
+
+func generatedStreamID(last streamID) streamID {
+	milliseconds := uint64(time.Now().UnixMilli())
+	if milliseconds < last.milliseconds {
+		milliseconds = last.milliseconds
+	}
+	sequence := uint64(0)
+	if milliseconds == last.milliseconds {
+		sequence = last.sequence + 1
+	}
+	return streamID{milliseconds: milliseconds, sequence: sequence}
+}
+
+func (id streamID) greaterThan(other streamID) bool {
+	return id.milliseconds > other.milliseconds ||
+		(id.milliseconds == other.milliseconds && id.sequence > other.sequence)
+}
+
+func (id streamID) String() string {
+	return strconv.FormatUint(id.milliseconds, 10) + "-" + strconv.FormatUint(id.sequence, 10)
 }
 
 func integerResponse(value int) []byte {
