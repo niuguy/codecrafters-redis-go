@@ -166,6 +166,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeSet(arguments, store)
 	case isCommand(arguments[0], "GET"):
 		return executeGet(arguments, store)
+	case isCommand(arguments[0], "INCR"):
+		return executeIncr(arguments, store)
 	case isCommand(arguments[0], "RPUSH"):
 		return executeRPush(arguments, store)
 	case isCommand(arguments[0], "LRANGE"):
@@ -481,6 +483,34 @@ func executeGet(arguments [][]byte, store map[string]redisValue) []byte {
 		return wrongTypeError()
 	}
 	return bulkString(value.string)
+}
+
+func executeIncr(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 2 {
+		return []byte("-ERR wrong number of arguments for 'incr' command\r\n")
+	}
+
+	key := string(arguments[1])
+	value, ok := store[key]
+	if ok && value.kind != stringKind {
+		return wrongTypeError()
+	}
+
+	current := int64(0)
+	if ok {
+		var err error
+		current, err = strconv.ParseInt(string(value.string), 10, 64)
+		if err != nil || current == 1<<63-1 {
+			return []byte("-ERR value is not an integer or out of range\r\n")
+		}
+	}
+
+	next := current + 1
+	store[key] = redisValue{
+		kind:   stringKind,
+		string: []byte(strconv.FormatInt(next, 10)),
+	}
+	return integer64Response(next)
 }
 
 func executeRPush(arguments [][]byte, store map[string]redisValue) []byte {
@@ -892,6 +922,14 @@ func integerResponse(value int) []byte {
 	response := make([]byte, 0, 24)
 	response = append(response, ':')
 	response = strconv.AppendInt(response, int64(value), 10)
+	response = append(response, '\r', '\n')
+	return response
+}
+
+func integer64Response(value int64) []byte {
+	response := make([]byte, 0, 24)
+	response = append(response, ':')
+	response = strconv.AppendInt(response, value, 10)
 	response = append(response, '\r', '\n')
 	return response
 }
