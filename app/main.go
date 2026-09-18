@@ -161,6 +161,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeXAdd(arguments, store)
 	case isCommand(arguments[0], "XRANGE"):
 		return executeXRange(arguments, store)
+	case isCommand(arguments[0], "XREAD"):
+		return executeXRead(arguments, store)
 	default:
 		return []byte("-ERR unknown command\r\n")
 	}
@@ -628,6 +630,73 @@ func executeXRange(arguments [][]byte, store map[string]redisValue) []byte {
 		}
 	}
 	return streamEntriesResponse(entries)
+}
+
+func executeXRead(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) < 4 || !isCommand(arguments[1], "STREAMS") || (len(arguments)-2)%2 != 0 {
+		return []byte("-ERR syntax error\r\n")
+	}
+
+	streamCount := (len(arguments) - 2) / 2
+	keys := arguments[2 : 2+streamCount]
+	ids := arguments[2+streamCount:]
+	results := make([]streamReadResult, 0, streamCount)
+
+	for i, keyArgument := range keys {
+		key := string(keyArgument)
+		value, exists := store[key]
+		if exists && value.kind != streamKind {
+			return wrongTypeError()
+		}
+
+		start, err := readStartID(ids[i], value, exists)
+		if err != nil {
+			return []byte("-ERR invalid stream ID specified as stream command argument\r\n")
+		}
+
+		if !exists {
+			continue
+		}
+		entries := make([]streamEntry, 0)
+		for _, entry := range value.stream {
+			if entry.id.greaterThan(start) {
+				entries = append(entries, entry)
+			}
+		}
+		if len(entries) > 0 {
+			results = append(results, streamReadResult{key: key, entries: entries})
+		}
+	}
+
+	if len(results) == 0 {
+		return []byte("*-1\r\n")
+	}
+	return streamReadResponse(results)
+}
+
+type streamReadResult struct {
+	key     string
+	entries []streamEntry
+}
+
+func readStartID(raw []byte, value redisValue, exists bool) (streamID, error) {
+	if bytes.Equal(raw, []byte("$")) {
+		if exists && len(value.stream) > 0 {
+			return value.stream[len(value.stream)-1].id, nil
+		}
+		return streamID{}, nil
+	}
+	return parseRangeID(raw, false)
+}
+
+func streamReadResponse(results []streamReadResult) []byte {
+	response := appendArrayHeader(nil, len(results))
+	for _, result := range results {
+		response = appendArrayHeader(response, 2)
+		response = append(response, bulkString([]byte(result.key))...)
+		response = append(response, streamEntriesResponse(result.entries)...)
+	}
+	return response
 }
 
 func parseRangeID(raw []byte, end bool) (streamID, error) {
