@@ -63,8 +63,14 @@ type streamID struct {
 type commandEvent struct {
 	command       []byte
 	response      chan []byte
+	client        *clientState
 	blocked       *blockedRequest
 	blockedStream *blockedStreamRequest
+}
+
+type clientState struct {
+	inMulti bool
+	queue   [][]byte
 }
 
 type blockedRequest struct {
@@ -122,6 +128,25 @@ func runEventLoop(events chan commandEvent) {
 		}
 
 		arguments, err := parseRESPCommand(event.command)
+		if err == nil && event.client != nil {
+			if isCommand(arguments[0], "MULTI") {
+				event.response <- beginTransaction(event.client)
+				continue
+			}
+			if isCommand(arguments[0], "EXEC") {
+				event.response <- executeTransaction(event.client, store, waiters, streamWaiters)
+				continue
+			}
+			if isCommand(arguments[0], "DISCARD") {
+				event.response <- discardTransaction(event.client)
+				continue
+			}
+			if event.client.inMulti {
+				event.client.queue = append(event.client.queue, cloneBytes(event.command))
+				event.response <- []byte("+QUEUED\r\n")
+				continue
+			}
+		}
 		if err == nil && len(arguments) > 0 && isCommand(arguments[0], "BLPOP") {
 			handleBlockingPop(event, arguments, store, waiters, events)
 			continue
@@ -133,12 +158,55 @@ func runEventLoop(events chan commandEvent) {
 
 		response := execute(event.command, store)
 		event.response <- response
-		if err == nil && isListPush(arguments) {
-			wakeBlockedRequests(arguments[1], store, waiters)
+		if err == nil {
+			wakeAfterCommand(arguments, store, waiters, streamWaiters)
 		}
-		if err == nil && len(arguments) > 1 && isCommand(arguments[0], "XADD") {
-			wakeBlockedStreamRequests(arguments[1], store, streamWaiters)
+	}
+}
+
+func beginTransaction(client *clientState) []byte {
+	if client.inMulti {
+		return []byte("-ERR MULTI calls can not be nested\r\n")
+	}
+	client.inMulti = true
+	client.queue = nil
+	return []byte("+OK\r\n")
+}
+
+func discardTransaction(client *clientState) []byte {
+	if !client.inMulti {
+		return []byte("-ERR DISCARD without MULTI\r\n")
+	}
+	client.inMulti = false
+	client.queue = nil
+	return []byte("+OK\r\n")
+}
+
+func executeTransaction(client *clientState, store map[string]redisValue, waiters map[string][]*blockedRequest, streamWaiters map[string][]*blockedStreamRequest) []byte {
+	if !client.inMulti {
+		return []byte("-ERR EXEC without MULTI\r\n")
+	}
+
+	queued := client.queue
+	client.inMulti = false
+	client.queue = nil
+	replies := make([][]byte, 0, len(queued))
+	for _, command := range queued {
+		arguments, err := parseRESPCommand(command)
+		replies = append(replies, execute(command, store))
+		if err == nil {
+			wakeAfterCommand(arguments, store, waiters, streamWaiters)
 		}
+	}
+	return rawArrayResponse(replies)
+}
+
+func wakeAfterCommand(arguments [][]byte, store map[string]redisValue, waiters map[string][]*blockedRequest, streamWaiters map[string][]*blockedStreamRequest) {
+	if len(arguments) > 1 && isListPush(arguments) {
+		wakeBlockedRequests(arguments[1], store, waiters)
+	}
+	if len(arguments) > 1 && isCommand(arguments[0], "XADD") {
+		wakeBlockedStreamRequests(arguments[1], store, streamWaiters)
 	}
 }
 
@@ -955,6 +1023,14 @@ func arrayResponse(values [][]byte) []byte {
 	return response
 }
 
+func rawArrayResponse(values [][]byte) []byte {
+	response := appendArrayHeader(nil, len(values))
+	for _, value := range values {
+		response = append(response, value...)
+	}
+	return response
+}
+
 func appendArrayHeader(response []byte, count int) []byte {
 	response = append(response, '*')
 	response = strconv.AppendInt(response, int64(count), 10)
@@ -1040,6 +1116,7 @@ func parseRESPCommand(command []byte) ([][]byte, error) {
 func handleConn(conn net.Conn, events chan<- commandEvent) {
 	defer conn.Close()
 
+	client := &clientState{}
 	response := make(chan []byte)
 	buf := make([]byte, 1024)
 
@@ -1055,6 +1132,7 @@ func handleConn(conn net.Conn, events chan<- commandEvent) {
 		events <- commandEvent{
 			command:  buf[:n],
 			response: response,
+			client:   client,
 		}
 
 		_, err = conn.Write(<-response)
