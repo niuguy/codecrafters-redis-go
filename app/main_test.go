@@ -106,6 +106,32 @@ func TestStringCommands(t *testing.T) {
 	}
 }
 
+func TestInfoCommand(t *testing.T) {
+	store := map[string]redisValue{"answer": {kind: stringKind, string: []byte("42")}}
+	response := execute(testRESPCommand("INFO"), store)
+	if !bytes.HasPrefix(response, []byte("$")) {
+		t.Fatalf("INFO response is not a bulk string: %q", response)
+	}
+	for _, expected := range []string{
+		"# Server\r\n",
+		"redis_version:",
+		"redis_mode:standalone\r\n",
+		"# Keyspace\r\n",
+		"db0:keys=1,expires=0,avg_ttl=0\r\n",
+	} {
+		if !bytes.Contains(response, []byte(expected)) {
+			t.Errorf("INFO response does not contain %q: %q", expected, response)
+		}
+	}
+
+	if got := execute(testRESPCommand("INFO", "keyspace"), store); !bytes.Contains(got, []byte("db0:keys=1")) {
+		t.Fatalf("INFO keyspace response = %q", got)
+	}
+	if got := execute(testRESPCommand("INFO", "too", "many"), store); string(got) != "-ERR wrong number of arguments for 'info' command\r\n" {
+		t.Fatalf("invalid INFO response = %q", got)
+	}
+}
+
 func TestSetExpirationValidation(t *testing.T) {
 	cases := []struct {
 		name       string

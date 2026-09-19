@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"time"
@@ -377,6 +378,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeLLen(arguments, store)
 	case isCommand(arguments[0], "TYPE"):
 		return executeType(arguments, store)
+	case isCommand(arguments[0], "INFO"):
+		return executeInfo(arguments, store)
 	case isCommand(arguments[0], "XADD"):
 		return executeXAdd(arguments, store)
 	case isCommand(arguments[0], "XRANGE"):
@@ -881,6 +884,39 @@ func executeType(arguments [][]byte, store map[string]redisValue) []byte {
 		return simpleString("none")
 	}
 	return simpleString(value.kind.String())
+}
+
+func executeInfo(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) > 2 {
+		return []byte("-ERR wrong number of arguments for 'info' command\r\n")
+	}
+
+	section := "default"
+	if len(arguments) == 2 {
+		section = string(arguments[1])
+	}
+
+	server := fmt.Sprintf(
+		"# Server\r\nredis_version:7.2.0\r\nredis_mode:standalone\r\nos:%s\r\narch_bits:%d\r\nprocess_id:%d\r\n\r\n",
+		runtime.GOOS,
+		strconv.IntSize,
+		os.Getpid(),
+	)
+	keyspace := fmt.Sprintf("# Keyspace\r\ndb0:keys=%d,expires=0,avg_ttl=0\r\n\r\n", len(store))
+	stats := "# Stats\r\ntotal_commands_processed:0\r\n\r\n"
+
+	switch {
+	case isCommand([]byte(section), "SERVER"):
+		return bulkString([]byte(server))
+	case isCommand([]byte(section), "KEYSPACE"):
+		return bulkString([]byte(keyspace))
+	case isCommand([]byte(section), "STATS"):
+		return bulkString([]byte(stats))
+	case isCommand([]byte(section), "ALL"), isCommand([]byte(section), "DEFAULT"):
+		return bulkString([]byte(server + stats + keyspace))
+	default:
+		return bulkString(nil)
+	}
 }
 
 func simpleString(value string) []byte {
