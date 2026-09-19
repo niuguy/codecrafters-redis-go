@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +17,8 @@ import (
 )
 
 const defaultPort = 6379
+
+var masterReplicationID = newReplicationID()
 
 var pong = []byte("+PONG\r\n")
 
@@ -140,6 +144,16 @@ func parsePort(arguments []string) (int, error) {
 		return 0, errors.New("port must be an integer between 1 and 65535")
 	}
 	return port, nil
+}
+
+func newReplicationID() string {
+	identifier := make([]byte, 20)
+	if _, err := cryptorand.Read(identifier); err != nil {
+		// A zero ID is still the correct length and keeps INFO available if the
+		// operating system cannot provide random bytes during startup.
+		return hex.EncodeToString(make([]byte, 20))
+	}
+	return hex.EncodeToString(identifier)
 }
 
 // runEventLoop serializes command execution and owns the shared Redis state.
@@ -904,6 +918,16 @@ func executeInfo(arguments [][]byte, store map[string]redisValue) []byte {
 	)
 	keyspace := fmt.Sprintf("# Keyspace\r\ndb0:keys=%d,expires=0,avg_ttl=0\r\n\r\n", len(store))
 	stats := "# Stats\r\ntotal_commands_processed:0\r\n\r\n"
+	replication := "# Replication\r\n" +
+		"role:master\r\n" +
+		"connected_slaves:0\r\n" +
+		"master_replid:" + masterReplicationID + "\r\n" +
+		"master_repl_offset:0\r\n" +
+		"second_repl_offset:-1\r\n" +
+		"repl_backlog_active:0\r\n" +
+		"repl_backlog_size:1048576\r\n" +
+		"repl_backlog_first_byte_offset:0\r\n" +
+		"repl_backlog_histlen:0\r\n\r\n"
 
 	switch {
 	case isCommand([]byte(section), "SERVER"):
@@ -912,8 +936,10 @@ func executeInfo(arguments [][]byte, store map[string]redisValue) []byte {
 		return bulkString([]byte(keyspace))
 	case isCommand([]byte(section), "STATS"):
 		return bulkString([]byte(stats))
+	case isCommand([]byte(section), "REPLICATION"):
+		return bulkString([]byte(replication))
 	case isCommand([]byte(section), "ALL"), isCommand([]byte(section), "DEFAULT"):
-		return bulkString([]byte(server + stats + keyspace))
+		return bulkString([]byte(server + stats + replication + keyspace))
 	default:
 		return bulkString(nil)
 	}

@@ -127,6 +127,22 @@ func TestInfoCommand(t *testing.T) {
 	if got := execute(testRESPCommand("INFO", "keyspace"), store); !bytes.Contains(got, []byte("db0:keys=1")) {
 		t.Fatalf("INFO keyspace response = %q", got)
 	}
+	replication := execute(testRESPCommand("INFO", "replication"), store)
+	for _, expected := range []string{
+		"# Replication\r\n",
+		"role:master\r\n",
+		"connected_slaves:0\r\n",
+		"master_replid:" + masterReplicationID + "\r\n",
+		"master_repl_offset:0\r\n",
+		"repl_backlog_size:1048576\r\n",
+	} {
+		if !bytes.Contains(replication, []byte(expected)) {
+			t.Errorf("replication INFO response does not contain %q: %q", expected, replication)
+		}
+	}
+	if len(masterReplicationID) != 40 {
+		t.Fatalf("master replication ID length = %d, want 40", len(masterReplicationID))
+	}
 	if got := execute(testRESPCommand("INFO", "too", "many"), store); string(got) != "-ERR wrong number of arguments for 'info' command\r\n" {
 		t.Fatalf("invalid INFO response = %q", got)
 	}
