@@ -7,10 +7,13 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"slices"
 	"strconv"
 	"time"
 )
+
+const defaultPort = 6379
 
 var pong = []byte("+PONG\r\n")
 
@@ -66,6 +69,7 @@ type commandEvent struct {
 	client        *clientState
 	blocked       *blockedRequest
 	blockedStream *blockedStreamRequest
+	expiration    *expirationEvent
 }
 
 type clientState struct {
@@ -89,13 +93,23 @@ type blockedStreamRequest struct {
 	timer *time.Timer
 }
 
+type expirationEvent struct {
+	key     string
+	version uint64
+}
+
 func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	fmt.Println("Logs from your program will appear here!")
 
-	listener, err := net.Listen("tcp", "0.0.0.0:6379")
+	port, err := parsePort(os.Args[1:])
 	if err != nil {
-		log.Fatal("Failed to bind to port 6379: ", err)
+		log.Fatal(err)
+	}
+	address := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		log.Fatalf("Failed to bind to port %d: %v", port, err)
 	}
 	defer listener.Close()
 
@@ -112,6 +126,21 @@ func main() {
 	}
 }
 
+func parsePort(arguments []string) (int, error) {
+	if len(arguments) == 0 {
+		return defaultPort, nil
+	}
+	if len(arguments) != 2 || arguments[0] != "--port" {
+		return 0, errors.New("usage: your_program --port <port>")
+	}
+
+	port, err := strconv.Atoi(arguments[1])
+	if err != nil || port < 1 || port > 65535 {
+		return 0, errors.New("port must be an integer between 1 and 65535")
+	}
+	return port, nil
+}
+
 // runEventLoop serializes command execution and owns the shared Redis state.
 func runEventLoop(events chan commandEvent) {
 	store := make(map[string]redisValue)
@@ -120,6 +149,10 @@ func runEventLoop(events chan commandEvent) {
 	streamWaiters := make(map[string][]*blockedStreamRequest)
 
 	for event := range events {
+		if event.expiration != nil {
+			applyExpiration(event.expiration, store, versions)
+			continue
+		}
 		if event.blocked != nil {
 			expireBlockedRequest(event.blocked, waiters)
 			continue
@@ -144,7 +177,7 @@ func runEventLoop(events chan commandEvent) {
 				continue
 			}
 			if isCommand(arguments[0], "EXEC") {
-				event.response <- executeTransaction(event.client, store, versions, waiters, streamWaiters)
+				event.response <- executeTransaction(event.client, store, versions, waiters, streamWaiters, events)
 				continue
 			}
 			if isCommand(arguments[0], "DISCARD") {
@@ -169,10 +202,19 @@ func runEventLoop(events chan commandEvent) {
 		response := execute(event.command, store)
 		if err == nil {
 			touchModifiedKeys(arguments, response, versions)
+			scheduleExpiration(arguments, response, versions, events)
 			wakeAfterCommand(arguments, store, waiters, streamWaiters)
 		}
 		event.response <- response
 	}
+}
+
+func applyExpiration(expiration *expirationEvent, store map[string]redisValue, versions map[string]uint64) {
+	if versions[expiration.key] != expiration.version {
+		return
+	}
+	delete(store, expiration.key)
+	versions[expiration.key]++
 }
 
 func beginTransaction(client *clientState) []byte {
@@ -222,7 +264,11 @@ func discardTransaction(client *clientState) []byte {
 	return []byte("+OK\r\n")
 }
 
-func executeTransaction(client *clientState, store map[string]redisValue, versions map[string]uint64, waiters map[string][]*blockedRequest, streamWaiters map[string][]*blockedStreamRequest) []byte {
+func executeTransaction(client *clientState, store map[string]redisValue, versions map[string]uint64, waiters map[string][]*blockedRequest, streamWaiters map[string][]*blockedStreamRequest, eventChannels ...chan<- commandEvent) []byte {
+	var events chan<- commandEvent
+	if len(eventChannels) > 0 {
+		events = eventChannels[0]
+	}
 	if !client.inMulti {
 		return []byte("-ERR EXEC without MULTI\r\n")
 	}
@@ -245,6 +291,7 @@ func executeTransaction(client *clientState, store map[string]redisValue, versio
 		replies = append(replies, response)
 		if err == nil {
 			touchModifiedKeys(arguments, response, versions)
+			scheduleExpiration(arguments, response, versions, events)
 			wakeAfterCommand(arguments, store, waiters, streamWaiters)
 		}
 	}
@@ -598,20 +645,8 @@ func executeSet(arguments [][]byte, store map[string]redisValue) []byte {
 	if len(arguments) < 3 {
 		return []byte("-ERR wrong number of arguments for 'set' command\r\n")
 	}
-	if len(arguments) > 4 {
-		var sleepTime time.Duration
-		if isCommand(arguments[3], "EX") {
-			sleepTimeNumber, _ := strconv.Atoi(string(arguments[4]))
-			sleepTime = time.Duration(sleepTimeNumber) * time.Second
-		} else if isCommand(arguments[3], "PX") {
-			sleepTimeNumber, _ := strconv.Atoi(string(arguments[4]))
-			sleepTime = time.Duration(sleepTimeNumber) * time.Millisecond
-		}
-
-		go func() {
-			time.Sleep(sleepTime)
-			delete(store, string(arguments[1]))
-		}()
+	if _, _, err := setExpiration(arguments); err != nil {
+		return []byte("-ERR " + err.Error() + "\r\n")
 	}
 
 	store[string(arguments[1])] = redisValue{
@@ -619,6 +654,48 @@ func executeSet(arguments [][]byte, store map[string]redisValue) []byte {
 		string: cloneBytes(arguments[2]),
 	}
 	return []byte("+OK\r\n")
+}
+
+func setExpiration(arguments [][]byte) (time.Duration, bool, error) {
+	if len(arguments) == 3 {
+		return 0, false, nil
+	}
+	if len(arguments) != 5 {
+		return 0, false, errors.New("syntax error")
+	}
+
+	multiplier := time.Second
+	switch {
+	case isCommand(arguments[3], "EX"):
+		multiplier = time.Second
+	case isCommand(arguments[3], "PX"):
+		multiplier = time.Millisecond
+	default:
+		return 0, false, errors.New("syntax error")
+	}
+
+	amount, err := strconv.ParseInt(string(arguments[4]), 10, 64)
+	if err != nil || amount <= 0 {
+		return 0, false, errors.New("invalid expire time in 'set' command")
+	}
+	if amount > int64((time.Duration(1<<63-1))/multiplier) {
+		return 0, false, errors.New("invalid expire time in 'set' command")
+	}
+	return time.Duration(amount) * multiplier, true, nil
+}
+
+func scheduleExpiration(arguments [][]byte, response []byte, versions map[string]uint64, events chan<- commandEvent) {
+	if events == nil || len(arguments) < 3 || !isCommand(arguments[0], "SET") || len(response) == 0 || response[0] == '-' {
+		return
+	}
+	duration, hasExpiration, err := setExpiration(arguments)
+	if err != nil || !hasExpiration {
+		return
+	}
+	expiration := &expirationEvent{key: string(arguments[1]), version: versions[string(arguments[1])]}
+	time.AfterFunc(duration, func() {
+		events <- commandEvent{expiration: expiration}
+	})
 }
 
 func executeGet(arguments [][]byte, store map[string]redisValue) []byte {
@@ -1199,7 +1276,9 @@ func handleConn(conn net.Conn, events chan<- commandEvent) {
 	defer conn.Close()
 
 	client := &clientState{}
-	response := make(chan []byte)
+	// Buffer one response so the event loop does not wait for the connection
+	// goroutine to receive before it can process another client.
+	response := make(chan []byte, 1)
 	buf := make([]byte, 1024)
 
 	for {
