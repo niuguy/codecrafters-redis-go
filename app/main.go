@@ -13,12 +13,19 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
 const defaultPort = 6379
 
 var masterReplicationID = newReplicationID()
+var serverRole = "master"
+
+type serverConfig struct {
+	port      int
+	replicaOf string
+}
 
 var pong = []byte("+PONG\r\n")
 
@@ -107,14 +114,15 @@ func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	fmt.Println("Logs from your program will appear here!")
 
-	port, err := parsePort(os.Args[1:])
+	config, err := parseServerConfig(os.Args[1:])
 	if err != nil {
 		log.Fatal(err)
 	}
-	address := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
+	serverRole = config.role()
+	address := net.JoinHostPort("0.0.0.0", strconv.Itoa(config.port))
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		log.Fatalf("Failed to bind to port %d: %v", port, err)
+		log.Fatalf("Failed to bind to port %d: %v", config.port, err)
 	}
 	defer listener.Close()
 
@@ -144,6 +152,52 @@ func parsePort(arguments []string) (int, error) {
 		return 0, errors.New("port must be an integer between 1 and 65535")
 	}
 	return port, nil
+}
+
+func parseServerConfig(arguments []string) (serverConfig, error) {
+	config := serverConfig{port: defaultPort}
+	for position := 0; position < len(arguments); {
+		switch arguments[position] {
+		case "--port":
+			if position+1 >= len(arguments) {
+				return serverConfig{}, errors.New("usage: your_program --port <port>")
+			}
+			port, err := parsePort(arguments[position : position+2])
+			if err != nil {
+				return serverConfig{}, err
+			}
+			config.port = port
+			position += 2
+		case "--replicaof":
+			if position+1 >= len(arguments) {
+				return serverConfig{}, errors.New("usage: your_program --replicaof \"<host> <port>\"")
+			}
+			replicaOf := strings.Fields(arguments[position+1])
+			consumed := 2
+			if len(replicaOf) != 2 && position+2 < len(arguments) && !strings.HasPrefix(arguments[position+2], "--") {
+				replicaOf = []string{arguments[position+1], arguments[position+2]}
+				consumed = 3
+			}
+			if len(replicaOf) != 2 {
+				return serverConfig{}, errors.New("usage: your_program --replicaof \"<host> <port>\"")
+			}
+			if _, err := parsePort([]string{"--port", replicaOf[1]}); err != nil {
+				return serverConfig{}, errors.New("replica port must be an integer between 1 and 65535")
+			}
+			config.replicaOf = strings.Join(replicaOf, " ")
+			position += consumed
+		default:
+			return serverConfig{}, errors.New("usage: your_program [--port <port>] [--replicaof \"<host> <port>\"]")
+		}
+	}
+	return config, nil
+}
+
+func (config serverConfig) role() string {
+	if config.replicaOf != "" {
+		return "slave"
+	}
+	return "master"
 }
 
 func newReplicationID() string {
@@ -919,7 +973,7 @@ func executeInfo(arguments [][]byte, store map[string]redisValue) []byte {
 	keyspace := fmt.Sprintf("# Keyspace\r\ndb0:keys=%d,expires=0,avg_ttl=0\r\n\r\n", len(store))
 	stats := "# Stats\r\ntotal_commands_processed:0\r\n\r\n"
 	replication := "# Replication\r\n" +
-		"role:master\r\n" +
+		"role:" + serverRole + "\r\n" +
 		"connected_slaves:0\r\n" +
 		"master_replid:" + masterReplicationID + "\r\n" +
 		"master_repl_offset:0\r\n" +

@@ -63,6 +63,32 @@ func TestParsePort(t *testing.T) {
 	}
 }
 
+func TestParseServerConfig(t *testing.T) {
+	master, err := parseServerConfig(nil)
+	if err != nil {
+		t.Fatalf("parse default config: %v", err)
+	}
+	if master.port != defaultPort || master.role() != "master" {
+		t.Fatalf("default config = %+v, want port %d and master role", master, defaultPort)
+	}
+
+	replica, err := parseServerConfig([]string{"--port", "6380", "--replicaof", "localhost 6379"})
+	if err != nil {
+		t.Fatalf("parse replica config: %v", err)
+	}
+	if replica.port != 6380 || replica.replicaOf != "localhost 6379" || replica.role() != "slave" {
+		t.Fatalf("replica config = %+v, want port 6380, localhost 6379, slave role", replica)
+	}
+
+	separateArguments, err := parseServerConfig([]string{"--replicaof", "localhost", "6379"})
+	if err != nil {
+		t.Fatalf("parse separate replica arguments: %v", err)
+	}
+	if separateArguments.role() != "slave" {
+		t.Fatalf("separate replica arguments produced role %q", separateArguments.role())
+	}
+}
+
 func TestParseRESPCommand(t *testing.T) {
 	arguments, err := parseRESPCommand(testRESPCommand("ECHO", "hello"))
 	if err != nil {
@@ -107,6 +133,9 @@ func TestStringCommands(t *testing.T) {
 }
 
 func TestInfoCommand(t *testing.T) {
+	previousRole := serverRole
+	defer func() { serverRole = previousRole }()
+	serverRole = "master"
 	store := map[string]redisValue{"answer": {kind: stringKind, string: []byte("42")}}
 	response := execute(testRESPCommand("INFO"), store)
 	if !bytes.HasPrefix(response, []byte("$")) {
@@ -142,6 +171,10 @@ func TestInfoCommand(t *testing.T) {
 	}
 	if len(masterReplicationID) != 40 {
 		t.Fatalf("master replication ID length = %d, want 40", len(masterReplicationID))
+	}
+	serverRole = "slave"
+	if got := execute(testRESPCommand("INFO", "replication"), store); !bytes.Contains(got, []byte("role:slave\r\n")) {
+		t.Fatalf("replica INFO response = %q", got)
 	}
 	if got := execute(testRESPCommand("INFO", "too", "many"), store); string(got) != "-ERR wrong number of arguments for 'info' command\r\n" {
 		t.Fatalf("invalid INFO response = %q", got)
