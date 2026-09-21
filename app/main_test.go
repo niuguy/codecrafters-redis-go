@@ -209,6 +209,20 @@ func TestSubscribeCommand(t *testing.T) {
 	if got := executeSubscribe(testRESPArguments("SUBSCRIBE"), client); got[0] != '-' {
 		t.Fatalf("invalid SUBSCRIBE response = %q", got)
 	}
+	if !client.subscribed {
+		t.Fatal("client did not enter subscribed mode")
+	}
+	for _, command := range []string{"SUBSCRIBE", "UNSUBSCRIBE", "PSUBSCRIBE", "PUNSUBSCRIBE", "PING", "QUIT"} {
+		if !allowedInSubscribedMode([]byte(command)) {
+			t.Errorf("%s was rejected in subscribed mode", command)
+		}
+	}
+	if allowedInSubscribedMode([]byte("ECHO")) {
+		t.Fatal("ECHO was allowed in subscribed mode")
+	}
+	if got := subscribedModeError("echo"); string(got) != "-ERR Can't execute 'echo': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n" {
+		t.Fatalf("subscribed mode error = %q", got)
+	}
 }
 
 func TestInitiateReplicaHandshakeSendsPing(t *testing.T) {

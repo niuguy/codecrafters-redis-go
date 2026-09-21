@@ -129,6 +129,7 @@ type transactionContext struct {
 
 type clientState struct {
 	inMulti       bool
+	subscribed    bool
 	queue         [][]byte
 	watched       map[string]uint64
 	subscriptions map[string]struct{}
@@ -541,6 +542,11 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 				event.response <- nil
 				continue
 			}
+		}
+		if err == nil && event.client != nil && event.client.subscribed && !allowedInSubscribedMode(arguments[0]) {
+			commandName := strings.ToLower(string(arguments[0]))
+			event.response <- subscribedModeError(commandName)
+			continue
 		}
 		if err == nil && event.client != nil {
 			if isCommand(arguments[0], "WATCH") {
@@ -1545,6 +1551,7 @@ func executeSubscribe(arguments [][]byte, client *clientState) []byte {
 	if client.subscriptions == nil {
 		client.subscriptions = make(map[string]struct{})
 	}
+	client.subscribed = true
 
 	response := make([]byte, 0, len(arguments)*32)
 	for _, argument := range arguments[1:] {
@@ -1557,6 +1564,19 @@ func executeSubscribe(arguments [][]byte, client *clientState) []byte {
 		})...)
 	}
 	return response
+}
+
+func allowedInSubscribedMode(command []byte) bool {
+	return isCommand(command, "SUBSCRIBE") ||
+		isCommand(command, "UNSUBSCRIBE") ||
+		isCommand(command, "PSUBSCRIBE") ||
+		isCommand(command, "PUNSUBSCRIBE") ||
+		isCommand(command, "PING") ||
+		isCommand(command, "QUIT")
+}
+
+func subscribedModeError(command string) []byte {
+	return []byte("-ERR Can't execute '" + command + "': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n")
 }
 
 const (
