@@ -107,16 +107,34 @@ func TestInitiateReplicaHandshakeSendsPing(t *testing.T) {
 			return
 		}
 		defer connection.Close()
-		frame := make([]byte, len(replicationPing))
-		_, err = io.ReadFull(connection, frame)
-		if err == nil && !bytes.Equal(frame, replicationPing) {
-			err = fmt.Errorf("received %q, want %q", frame, replicationPing)
+		commands := [][]byte{
+			replicationPing,
+			encodeRESPCommand("REPLCONF", "listening-port", "6380"),
+			encodeRESPCommand("REPLCONF", "capa", "psync2"),
+		}
+		responses := [][]byte{
+			[]byte("+PONG\r\n"),
+			[]byte("+OK\r\n"),
+			[]byte("+OK\r\n"),
+		}
+		for i, command := range commands {
+			frame := make([]byte, len(command))
+			if _, err = io.ReadFull(connection, frame); err != nil {
+				break
+			}
+			if !bytes.Equal(frame, command) {
+				err = fmt.Errorf("received %q, want %q", frame, command)
+				break
+			}
+			if _, err = connection.Write(responses[i]); err != nil {
+				break
+			}
 		}
 		received <- err
 	}()
 
 	port := listener.Addr().(*net.TCPAddr).Port
-	initiateReplicaHandshake(fmt.Sprintf("127.0.0.1 %d", port))
+	initiateReplicaHandshake(fmt.Sprintf("127.0.0.1 %d", port), 6380)
 	if err := <-received; err != nil {
 		t.Fatalf("replica handshake: %v", err)
 	}

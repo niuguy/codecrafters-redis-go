@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	cryptorand "crypto/rand"
 	"encoding/hex"
@@ -129,7 +130,7 @@ func main() {
 	}
 	defer listener.Close()
 	if config.replicaOf != "" {
-		go initiateReplicaHandshake(config.replicaOf)
+		go initiateReplicaHandshake(config.replicaOf, config.port)
 	}
 
 	events := make(chan commandEvent)
@@ -206,7 +207,7 @@ func (config serverConfig) role() string {
 	return "master"
 }
 
-func initiateReplicaHandshake(replicaOf string) {
+func initiateReplicaHandshake(replicaOf string, listeningPorts ...int) {
 	address, err := replicaAddress(replicaOf)
 	if err != nil {
 		log.Println("Invalid replica master address:", err)
@@ -219,14 +220,74 @@ func initiateReplicaHandshake(replicaOf string) {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		if _, err := connection.Write(replicationPing); err != nil {
+
+		if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			_ = connection.Close()
+			continue
+		}
+		reader := bufio.NewReader(connection)
+		if err := sendHandshakeCommand(connection, reader, replicationPing, "+PONG\r\n"); err != nil {
 			_ = connection.Close()
 			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		listeningPort := defaultPort
+		if len(listeningPorts) > 0 {
+			listeningPort = listeningPorts[0]
+		}
+		commands := [][]byte{
+			encodeRESPCommand("REPLCONF", "listening-port", strconv.Itoa(listeningPort)),
+			encodeRESPCommand("REPLCONF", "capa", "psync2"),
+		}
+		valid := true
+		for _, command := range commands {
+			if err := sendHandshakeCommand(connection, reader, command, "+OK\r\n"); err != nil {
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			_ = connection.Close()
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if err := connection.SetDeadline(time.Time{}); err != nil {
+			_ = connection.Close()
 			continue
 		}
 		replicaMasterConn = connection
 		return
 	}
+}
+
+func sendHandshakeCommand(connection net.Conn, reader *bufio.Reader, command []byte, expectedResponse string) error {
+	if _, err := connection.Write(command); err != nil {
+		return err
+	}
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if response != expectedResponse {
+		return fmt.Errorf("unexpected handshake response %q, want %q", response, expectedResponse)
+	}
+	return nil
+}
+
+func encodeRESPCommand(arguments ...string) []byte {
+	command := make([]byte, 0, 64)
+	command = append(command, '*')
+	command = strconv.AppendInt(command, int64(len(arguments)), 10)
+	command = append(command, '\r', '\n')
+	for _, argument := range arguments {
+		command = append(command, '$')
+		command = strconv.AppendInt(command, int64(len(argument)), 10)
+		command = append(command, '\r', '\n')
+		command = append(command, argument...)
+		command = append(command, '\r', '\n')
+	}
+	return command
 }
 
 func replicaAddress(replicaOf string) (string, error) {
