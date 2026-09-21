@@ -5,6 +5,7 @@ import (
 	"bytes"
 	cryptorand "crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -157,6 +159,11 @@ func main() {
 	serverRole = config.role()
 	configuredDir = config.dir
 	configuredDBFilename = config.dbfilename
+	store, err := loadRDBStore(filepath.Join(config.dir, config.dbfilename))
+	if err != nil {
+		log.Printf("Could not load RDB file: %v", err)
+		store = make(map[string]redisValue)
+	}
 	address := net.JoinHostPort("0.0.0.0", strconv.Itoa(config.port))
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
@@ -164,7 +171,7 @@ func main() {
 	}
 	defer listener.Close()
 	events := make(chan commandEvent)
-	go runEventLoop(events)
+	go runEventLoop(events, store)
 	if config.replicaOf != "" {
 		go initiateReplicaHandshakeWithEvents(config.replicaOf, config.port, events)
 	}
@@ -420,8 +427,11 @@ func mustDecodeBase64(value string) []byte {
 }
 
 // runEventLoop serializes command execution and owns the shared Redis state.
-func runEventLoop(events chan commandEvent) {
+func runEventLoop(events chan commandEvent, initialStores ...map[string]redisValue) {
 	store := make(map[string]redisValue)
+	if len(initialStores) > 0 && initialStores[0] != nil {
+		store = initialStores[0]
+	}
 	versions := make(map[string]uint64)
 	waiters := make(map[string][]*blockedRequest)
 	streamWaiters := make(map[string][]*blockedStreamRequest)
@@ -936,6 +946,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeLLen(arguments, store)
 	case isCommand(arguments[0], "TYPE"):
 		return executeType(arguments, store)
+	case isCommand(arguments[0], "KEYS"):
+		return executeKeys(arguments, store)
 	case isCommand(arguments[0], "CONFIG"):
 		return executeConfig(arguments)
 	case isCommand(arguments[0], "INFO"):
@@ -1465,6 +1477,203 @@ func executeType(arguments [][]byte, store map[string]redisValue) []byte {
 		return simpleString("none")
 	}
 	return simpleString(value.kind.String())
+}
+
+func executeKeys(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 2 {
+		return []byte("-ERR wrong number of arguments for 'keys' command\r\n")
+	}
+	if !bytes.Equal(arguments[1], []byte("*")) {
+		return []byte("-ERR only the '*' pattern is supported\r\n")
+	}
+
+	keys := make([]string, 0, len(store))
+	for key := range store {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	values := make([][]byte, 0, len(keys))
+	for _, key := range keys {
+		values = append(values, []byte(key))
+	}
+	return arrayResponse(values)
+}
+
+const (
+	rdbOpcodeAux          = 0xFA
+	rdbOpcodeResizeDB     = 0xFB
+	rdbOpcodeExpireTimeMS = 0xFC
+	rdbOpcodeExpireTime   = 0xFD
+	rdbOpcodeSelectDB     = 0xFE
+	rdbOpcodeEOF          = 0xFF
+)
+
+func loadRDBStore(path string) (map[string]redisValue, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return make(map[string]redisValue), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return parseRDBStore(data)
+}
+
+func parseRDBStore(data []byte) (map[string]redisValue, error) {
+	store := make(map[string]redisValue)
+	if len(data) < 9 || !bytes.Equal(data[:5], []byte("REDIS")) {
+		return nil, errors.New("invalid RDB header")
+	}
+
+	position := 9
+	var expiryMilliseconds int64
+	for position < len(data) {
+		opcode := data[position]
+		position++
+
+		switch opcode {
+		case rdbOpcodeEOF:
+			return store, nil
+		case rdbOpcodeAux:
+			var err error
+			if _, position, err = readRDBString(data, position); err != nil {
+				return nil, err
+			}
+			if _, position, err = readRDBString(data, position); err != nil {
+				return nil, err
+			}
+			continue
+		case rdbOpcodeSelectDB:
+			var err error
+			_, _, _, position, err = readRDBLength(data, position)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		case rdbOpcodeResizeDB:
+			var err error
+			_, _, _, position, err = readRDBLength(data, position)
+			if err != nil {
+				return nil, err
+			}
+			_, _, _, position, err = readRDBLength(data, position)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		case rdbOpcodeExpireTimeMS:
+			if position+8 > len(data) {
+				return nil, errors.New("truncated RDB millisecond expiration")
+			}
+			expiryMilliseconds = int64(binary.LittleEndian.Uint64(data[position : position+8]))
+			position += 8
+			continue
+		case rdbOpcodeExpireTime:
+			if position+4 > len(data) {
+				return nil, errors.New("truncated RDB expiration")
+			}
+			seconds := binary.LittleEndian.Uint32(data[position : position+4])
+			expiryMilliseconds = int64(seconds) * 1000
+			position += 4
+			continue
+		case 0xF8: // IDLE
+			var err error
+			_, _, _, position, err = readRDBLength(data, position)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		case 0xF9: // LFU frequency
+			if position >= len(data) {
+				return nil, errors.New("truncated RDB frequency")
+			}
+			position++
+			continue
+		}
+
+		key, nextPosition, err := readRDBString(data, position)
+		if err != nil {
+			return nil, err
+		}
+		position = nextPosition
+		if opcode != 0 {
+			return nil, fmt.Errorf("unsupported RDB value type 0x%02x", opcode)
+		}
+		value, nextPosition, err := readRDBString(data, position)
+		if err != nil {
+			return nil, err
+		}
+		position = nextPosition
+		if expiryMilliseconds > 0 && expiryMilliseconds <= time.Now().UnixMilli() {
+			expiryMilliseconds = 0
+			continue
+		}
+		store[string(key)] = redisValue{kind: stringKind, string: cloneBytes(value)}
+		expiryMilliseconds = 0
+	}
+	return store, nil
+}
+
+func readRDBLength(data []byte, position int) (length int, special bool, encoding byte, nextPosition int, err error) {
+	if position >= len(data) {
+		return 0, false, 0, position, errors.New("truncated RDB length")
+	}
+	first := data[position]
+	position++
+	switch first >> 6 {
+	case 0:
+		return int(first & 0x3F), false, 0, position, nil
+	case 1:
+		if position >= len(data) {
+			return 0, false, 0, position, errors.New("truncated RDB 14-bit length")
+		}
+		return int(first&0x3F)<<8 | int(data[position]), false, 0, position + 1, nil
+	case 2:
+		if position+4 > len(data) {
+			return 0, false, 0, position, errors.New("truncated RDB 32-bit length")
+		}
+		value := binary.BigEndian.Uint32(data[position : position+4])
+		if uint64(value) > uint64(^uint(0)>>1) {
+			return 0, false, 0, position, errors.New("RDB length is too large")
+		}
+		return int(value), false, 0, position + 4, nil
+	default:
+		return 0, true, first & 0x3F, position, nil
+	}
+}
+
+func readRDBString(data []byte, position int) ([]byte, int, error) {
+	length, special, encoding, position, err := readRDBLength(data, position)
+	if err != nil {
+		return nil, position, err
+	}
+	if special {
+		switch encoding {
+		case 0:
+			if position >= len(data) {
+				return nil, position, errors.New("truncated RDB 8-bit integer")
+			}
+			return []byte(strconv.FormatInt(int64(int8(data[position])), 10)), position + 1, nil
+		case 1:
+			if position+2 > len(data) {
+				return nil, position, errors.New("truncated RDB 16-bit integer")
+			}
+			value := int16(binary.LittleEndian.Uint16(data[position : position+2]))
+			return []byte(strconv.FormatInt(int64(value), 10)), position + 2, nil
+		case 2:
+			if position+4 > len(data) {
+				return nil, position, errors.New("truncated RDB 32-bit integer")
+			}
+			value := int32(binary.LittleEndian.Uint32(data[position : position+4]))
+			return []byte(strconv.FormatInt(int64(value), 10)), position + 4, nil
+		default:
+			return nil, position, fmt.Errorf("unsupported RDB string encoding %d", encoding)
+		}
+	}
+	if length < 0 || position+length > len(data) {
+		return nil, position, errors.New("truncated RDB string")
+	}
+	return data[position : position+length], position + length, nil
 }
 
 func executeConfig(arguments [][]byte) []byte {

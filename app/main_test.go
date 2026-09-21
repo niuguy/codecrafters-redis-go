@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -126,6 +128,44 @@ func TestConfigGetCommand(t *testing.T) {
 	}
 	if got := execute(testRESPCommand("CONFIG", "GET", "unknown"), store); string(got) != "*0\r\n" {
 		t.Fatalf("CONFIG GET unknown response = %q", got)
+	}
+}
+
+func TestLoadRDBSingleStringAndKeys(t *testing.T) {
+	rdb := []byte{
+		'R', 'E', 'D', 'I', 'S', '0', '0', '1', '1',
+		0x00, 0x03, 'f', 'o', 'o', 0x03, 'b', 'a', 'r',
+		0xFF,
+	}
+	path := filepath.Join(t.TempDir(), "dump.rdb")
+	if err := os.WriteFile(path, rdb, 0o600); err != nil {
+		t.Fatalf("write RDB fixture: %v", err)
+	}
+	store, err := loadRDBStore(path)
+	if err != nil {
+		t.Fatalf("load RDB fixture: %v", err)
+	}
+	if got := execute(testRESPCommand("GET", "foo"), store); string(got) != "$3\r\nbar\r\n" {
+		t.Fatalf("loaded GET response = %q", got)
+	}
+	if got := execute(testRESPCommand("KEYS", "*"), store); string(got) != "*1\r\n$3\r\nfoo\r\n" {
+		t.Fatalf("KEYS response = %q", got)
+	}
+}
+
+func TestKeysOnlySupportsWildcard(t *testing.T) {
+	store := map[string]redisValue{
+		"baz": {kind: stringKind, string: []byte("qux")},
+		"foo": {kind: stringKind, string: []byte("bar")},
+	}
+	if got := execute(testRESPCommand("KEYS", "f*"), store); got[0] != '-' {
+		t.Fatalf("unsupported KEYS pattern response = %q", got)
+	}
+	if got := execute(testRESPCommand("KEYS"), store); got[0] != '-' {
+		t.Fatalf("invalid KEYS response = %q", got)
+	}
+	if got := execute(testRESPCommand("KEYS", "*"), store); string(got) != "*2\r\n$3\r\nbaz\r\n$3\r\nfoo\r\n" {
+		t.Fatalf("sorted KEYS response = %q", got)
 	}
 }
 
