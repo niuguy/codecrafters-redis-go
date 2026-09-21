@@ -23,15 +23,24 @@ import (
 
 const (
 	defaultPort       = 6379
-	defaultDir        = "."
 	defaultDBFilename = "dump.rdb"
+	defaultAppendOnly = "no"
+	defaultAppendDir  = "appendonlydir"
+	defaultAppendFile = "appendonly.aof"
+	defaultAppendSync = "everysec"
 )
+
+var defaultDir = currentWorkingDirectory()
 
 var masterReplicationID = newReplicationID()
 var serverRole = "master"
 var replicaMasterConn net.Conn
 var configuredDir = defaultDir
 var configuredDBFilename = defaultDBFilename
+var configuredAppendOnly = defaultAppendOnly
+var configuredAppendDir = defaultAppendDir
+var configuredAppendFile = defaultAppendFile
+var configuredAppendSync = defaultAppendSync
 
 var replicationPing = []byte("*1\r\n$4\r\nPING\r\n")
 
@@ -40,10 +49,14 @@ const emptyRDBBase64 = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoF
 var emptyRDB = mustDecodeBase64(emptyRDBBase64)
 
 type serverConfig struct {
-	port       int
-	replicaOf  string
-	dir        string
-	dbfilename string
+	port           int
+	replicaOf      string
+	dir            string
+	dbfilename     string
+	appendOnly     string
+	appendDirName  string
+	appendFilename string
+	appendFsync    string
 }
 
 var pong = []byte("+PONG\r\n")
@@ -159,6 +172,10 @@ func main() {
 	serverRole = config.role()
 	configuredDir = config.dir
 	configuredDBFilename = config.dbfilename
+	configuredAppendOnly = config.appendOnly
+	configuredAppendDir = config.appendDirName
+	configuredAppendFile = config.appendFilename
+	configuredAppendSync = config.appendFsync
 	store, err := loadRDBStore(filepath.Join(config.dir, config.dbfilename))
 	if err != nil {
 		log.Printf("Could not load RDB file: %v", err)
@@ -186,6 +203,14 @@ func main() {
 	}
 }
 
+func currentWorkingDirectory() string {
+	directory, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return directory
+}
+
 func parsePort(arguments []string) (int, error) {
 	if len(arguments) == 0 {
 		return defaultPort, nil
@@ -203,9 +228,13 @@ func parsePort(arguments []string) (int, error) {
 
 func parseServerConfig(arguments []string) (serverConfig, error) {
 	config := serverConfig{
-		port:       defaultPort,
-		dir:        defaultDir,
-		dbfilename: defaultDBFilename,
+		port:           defaultPort,
+		dir:            currentWorkingDirectory(),
+		dbfilename:     defaultDBFilename,
+		appendOnly:     defaultAppendOnly,
+		appendDirName:  defaultAppendDir,
+		appendFilename: defaultAppendFile,
+		appendFsync:    defaultAppendSync,
 	}
 	for position := 0; position < len(arguments); {
 		switch arguments[position] {
@@ -1689,10 +1718,22 @@ func executeConfig(arguments [][]byte) []byte {
 			values = append(values, []byte("dir"), []byte(configuredDir))
 		case "dbfilename":
 			values = append(values, []byte("dbfilename"), []byte(configuredDBFilename))
+		case "appendonly":
+			values = append(values, []byte("appendonly"), []byte(configuredAppendOnly))
+		case "appenddirname":
+			values = append(values, []byte("appenddirname"), []byte(configuredAppendDir))
+		case "appendfilename":
+			values = append(values, []byte("appendfilename"), []byte(configuredAppendFile))
+		case "appendfsync":
+			values = append(values, []byte("appendfsync"), []byte(configuredAppendSync))
 		case "*":
 			values = append(values,
 				[]byte("dir"), []byte(configuredDir),
 				[]byte("dbfilename"), []byte(configuredDBFilename),
+				[]byte("appendonly"), []byte(configuredAppendOnly),
+				[]byte("appenddirname"), []byte(configuredAppendDir),
+				[]byte("appendfilename"), []byte(configuredAppendFile),
+				[]byte("appendfsync"), []byte(configuredAppendSync),
 			)
 		}
 	}

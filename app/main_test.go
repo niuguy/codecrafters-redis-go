@@ -73,7 +73,9 @@ func TestParseServerConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse default config: %v", err)
 	}
-	if master.port != defaultPort || master.dir != defaultDir || master.dbfilename != defaultDBFilename || master.role() != "master" {
+	if master.port != defaultPort || master.dir != currentWorkingDirectory() || master.dbfilename != defaultDBFilename ||
+		master.appendOnly != defaultAppendOnly || master.appendDirName != defaultAppendDir ||
+		master.appendFilename != defaultAppendFile || master.appendFsync != defaultAppendSync || master.role() != "master" {
 		t.Fatalf("default config = %+v, want port %d and master role", master, defaultPort)
 	}
 
@@ -109,11 +111,23 @@ func TestParseServerConfig(t *testing.T) {
 func TestConfigGetCommand(t *testing.T) {
 	previousDir := configuredDir
 	previousDBFilename := configuredDBFilename
+	previousAppendOnly := configuredAppendOnly
+	previousAppendDir := configuredAppendDir
+	previousAppendFile := configuredAppendFile
+	previousAppendSync := configuredAppendSync
 	configuredDir = "/tmp/redis-data"
 	configuredDBFilename = "redis.rdb"
+	configuredAppendOnly = defaultAppendOnly
+	configuredAppendDir = defaultAppendDir
+	configuredAppendFile = defaultAppendFile
+	configuredAppendSync = defaultAppendSync
 	defer func() {
 		configuredDir = previousDir
 		configuredDBFilename = previousDBFilename
+		configuredAppendOnly = previousAppendOnly
+		configuredAppendDir = previousAppendDir
+		configuredAppendFile = previousAppendFile
+		configuredAppendSync = previousAppendSync
 	}()
 
 	store := make(map[string]redisValue)
@@ -128,6 +142,21 @@ func TestConfigGetCommand(t *testing.T) {
 	}
 	if got := execute(testRESPCommand("CONFIG", "GET", "unknown"), store); string(got) != "*0\r\n" {
 		t.Fatalf("CONFIG GET unknown response = %q", got)
+	}
+	for _, testCase := range []struct {
+		name string
+		want string
+	}{
+		{name: "appendonly", want: "no"},
+		{name: "appenddirname", want: "appendonlydir"},
+		{name: "appendfilename", want: "appendonly.aof"},
+		{name: "appendfsync", want: "everysec"},
+	} {
+		got := execute(testRESPCommand("CONFIG", "GET", testCase.name), store)
+		want := string(arrayResponse([][]byte{[]byte(testCase.name), []byte(testCase.want)}))
+		if string(got) != want {
+			t.Errorf("CONFIG GET %s response = %q, want %q", testCase.name, got, want)
+		}
 	}
 }
 
