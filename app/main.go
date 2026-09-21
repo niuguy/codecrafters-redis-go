@@ -252,6 +252,11 @@ func initiateReplicaHandshake(replicaOf string, listeningPorts ...int) {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
+		if _, err := connection.Write(encodeRESPCommand("PSYNC", "?", "-1")); err != nil {
+			_ = connection.Close()
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 		if err := connection.SetDeadline(time.Time{}); err != nil {
 			_ = connection.Close()
 			continue

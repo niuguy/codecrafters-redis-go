@@ -111,11 +111,13 @@ func TestInitiateReplicaHandshakeSendsPing(t *testing.T) {
 			replicationPing,
 			encodeRESPCommand("REPLCONF", "listening-port", "6380"),
 			encodeRESPCommand("REPLCONF", "capa", "psync2"),
+			encodeRESPCommand("PSYNC", "?", "-1"),
 		}
 		responses := [][]byte{
 			[]byte("+PONG\r\n"),
 			[]byte("+OK\r\n"),
 			[]byte("+OK\r\n"),
+			[]byte("+FULLRESYNC replica-id 0\r\n"),
 		}
 		for i, command := range commands {
 			frame := make([]byte, len(command))
