@@ -133,6 +133,8 @@ type clientState struct {
 	queue         [][]byte
 	watched       map[string]uint64
 	subscriptions map[string]struct{}
+	outbound      chan []byte
+	done          chan struct{}
 }
 
 type blockedRequest struct {
@@ -1610,7 +1612,33 @@ func executePublish(arguments [][]byte, subscribers map[string]map[*clientState]
 	if len(arguments) != 3 {
 		return []byte("-ERR wrong number of arguments for 'publish' command\r\n")
 	}
-	return integerResponse(len(subscribers[string(arguments[1])]))
+	clients := subscribers[string(arguments[1])]
+	for client := range clients {
+		enqueueClientOutput(client, publishedMessage(arguments[1], arguments[2]))
+	}
+	return integerResponse(len(clients))
+}
+
+func publishedMessage(channel, message []byte) []byte {
+	return rawArrayResponse([][]byte{
+		bulkString([]byte("message")),
+		bulkString(channel),
+		bulkString(message),
+	})
+}
+
+func enqueueClientOutput(client *clientState, output []byte) {
+	if client == nil || client.outbound == nil {
+		return
+	}
+	if client.done == nil {
+		client.outbound <- output
+		return
+	}
+	select {
+	case client.outbound <- output:
+	case <-client.done:
+	}
 }
 
 func allowedInSubscribedMode(command []byte) bool {
@@ -2358,9 +2386,29 @@ func readRESPFrame(reader *bufio.Reader) ([]byte, error) {
 }
 
 func handleConn(conn net.Conn, events chan<- commandEvent) {
-	client := &clientState{}
+	client := &clientState{
+		outbound: make(chan []byte, 64),
+		done:     make(chan struct{}),
+	}
+	go func() {
+		for {
+			select {
+			case output := <-client.outbound:
+				if len(output) == 0 {
+					continue
+				}
+				if _, err := conn.Write(output); err != nil {
+					_ = conn.Close()
+					return
+				}
+			case <-client.done:
+				return
+			}
+		}
+	}()
 	defer func() {
 		events <- commandEvent{connection: conn, client: client, disconnect: true}
+		close(client.done)
 		_ = conn.Close()
 	}()
 
@@ -2385,11 +2433,9 @@ func handleConn(conn net.Conn, events chan<- commandEvent) {
 			connection: conn,
 		}
 
-		_, err = conn.Write(<-response)
-		if err != nil {
-			if !errors.Is(err, net.ErrClosed) {
-				log.Println("Error writing: ", err)
-			}
+		select {
+		case client.outbound <- <-response:
+		case <-client.done:
 			return
 		}
 	}

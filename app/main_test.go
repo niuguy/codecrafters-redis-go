@@ -257,6 +257,27 @@ func TestPublishCommandCountsSubscribers(t *testing.T) {
 	}
 }
 
+func TestPublishDeliversMessage(t *testing.T) {
+	client := &clientState{outbound: make(chan []byte, 1)}
+	channels := testRESPArguments("SUBSCRIBE", "mychan")
+	executeSubscribe(channels, client)
+	subscribers := make(map[string]map[*clientState]struct{})
+	registerClientSubscriptions(client, channels[1:], subscribers)
+
+	if got := executePublish(testRESPArguments("PUBLISH", "mychan", "hello"), subscribers); string(got) != ":1\r\n" {
+		t.Fatalf("PUBLISH response = %q", got)
+	}
+	select {
+	case got := <-client.outbound:
+		want := "*3\r\n$7\r\nmessage\r\n$6\r\nmychan\r\n$5\r\nhello\r\n"
+		if string(got) != want {
+			t.Fatalf("published message = %q, want %q", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for published message")
+	}
+}
+
 func TestInitiateReplicaHandshakeSendsPing(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
