@@ -223,6 +223,12 @@ func TestSubscribeCommand(t *testing.T) {
 	if got := subscribedModeError("echo"); string(got) != "-ERR Can't execute 'echo': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n" {
 		t.Fatalf("subscribed mode error = %q", got)
 	}
+	if got := subscribedPing(testRESPArguments("PING")); string(got) != "*2\r\n$4\r\npong\r\n$0\r\n\r\n" {
+		t.Fatalf("subscribed PING response = %q", got)
+	}
+	if got := subscribedPing(testRESPArguments("PING", "hello")); string(got) != "*2\r\n$4\r\npong\r\n$5\r\nhello\r\n" {
+		t.Fatalf("subscribed PING with message response = %q", got)
+	}
 }
 
 func TestInitiateReplicaHandshakeSendsPing(t *testing.T) {

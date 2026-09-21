@@ -548,6 +548,10 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 			event.response <- subscribedModeError(commandName)
 			continue
 		}
+		if err == nil && event.client != nil && event.client.subscribed && isCommand(arguments[0], "PING") {
+			event.response <- subscribedPing(arguments)
+			continue
+		}
 		if err == nil && event.client != nil {
 			if isCommand(arguments[0], "WATCH") {
 				event.response <- watchKeys(arguments, event.client, versions)
@@ -1577,6 +1581,17 @@ func allowedInSubscribedMode(command []byte) bool {
 
 func subscribedModeError(command string) []byte {
 	return []byte("-ERR Can't execute '" + command + "': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n")
+}
+
+func subscribedPing(arguments [][]byte) []byte {
+	if len(arguments) > 2 {
+		return []byte("-ERR wrong number of arguments for 'ping' command\r\n")
+	}
+	message := []byte{}
+	if len(arguments) == 2 {
+		message = arguments[1]
+	}
+	return rawArrayResponse([][]byte{bulkString([]byte("pong")), bulkString(message)})
 }
 
 const (
