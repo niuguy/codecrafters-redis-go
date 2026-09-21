@@ -231,6 +231,30 @@ func TestSubscribeCommand(t *testing.T) {
 	}
 }
 
+func TestUnsubscribeCommand(t *testing.T) {
+	client := &clientState{}
+	subscribers := make(map[string]map[*clientState]struct{})
+	channels := testRESPArguments("SUBSCRIBE", "mychan", "other")
+	executeSubscribe(channels, client)
+	registerClientSubscriptions(client, channels[1:], subscribers)
+
+	if got := executeUnsubscribe(testRESPArguments("UNSUBSCRIBE", "mychan"), client, subscribers); string(got) != "*3\r\n$11\r\nunsubscribe\r\n$6\r\nmychan\r\n:1\r\n" {
+		t.Fatalf("UNSUBSCRIBE response = %q", got)
+	}
+	if len(subscribers["mychan"]) != 0 || len(client.subscriptions) != 1 {
+		t.Fatalf("subscription registry after UNSUBSCRIBE = %#v, client subscriptions = %#v", subscribers, client.subscriptions)
+	}
+	if got := executeUnsubscribe(testRESPArguments("UNSUBSCRIBE"), client, subscribers); string(got) != "*3\r\n$11\r\nunsubscribe\r\n$5\r\nother\r\n:0\r\n" {
+		t.Fatalf("UNSUBSCRIBE all response = %q", got)
+	}
+	if client.subscribed {
+		t.Fatal("client remained in subscribed mode after removing all channels")
+	}
+	if got := executeUnsubscribe(testRESPArguments("UNSUBSCRIBE"), client, subscribers); string(got) != "*3\r\n$11\r\nunsubscribe\r\n$0\r\n\r\n:0\r\n" {
+		t.Fatalf("UNSUBSCRIBE with no channels response = %q", got)
+	}
+}
+
 func TestPublishCommandCountsSubscribers(t *testing.T) {
 	first := &clientState{}
 	second := &clientState{}

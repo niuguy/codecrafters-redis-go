@@ -588,6 +588,10 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 				event.response <- response
 				continue
 			}
+			if isCommand(arguments[0], "UNSUBSCRIBE") {
+				event.response <- executeUnsubscribe(arguments, event.client, subscribers)
+				continue
+			}
 			if event.client.inMulti {
 				event.client.queue = append(event.client.queue, cloneBytes(event.command))
 				event.response <- []byte("+QUEUED\r\n")
@@ -1004,6 +1008,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeKeys(arguments, store)
 	case isCommand(arguments[0], "SUBSCRIBE"):
 		return executeSubscribe(arguments, nil)
+	case isCommand(arguments[0], "UNSUBSCRIBE"):
+		return executeUnsubscribe(arguments, nil, nil)
 	case isCommand(arguments[0], "PUBLISH"):
 		return executePublish(arguments, nil)
 	case isCommand(arguments[0], "CONFIG"):
@@ -1593,6 +1599,45 @@ func registerClientSubscriptions(client *clientState, channels [][]byte, subscri
 		}
 		subscribers[name][client] = struct{}{}
 	}
+}
+
+func executeUnsubscribe(arguments [][]byte, client *clientState, subscribers map[string]map[*clientState]struct{}) []byte {
+	if client == nil {
+		client = &clientState{}
+	}
+	channels := make([]string, 0, len(arguments)-1)
+	if len(arguments) == 1 {
+		for channel := range client.subscriptions {
+			channels = append(channels, channel)
+		}
+		slices.Sort(channels)
+		if len(channels) == 0 {
+			channels = append(channels, "")
+		}
+	} else {
+		for _, argument := range arguments[1:] {
+			channels = append(channels, string(argument))
+		}
+	}
+
+	response := make([]byte, 0, len(channels)*32)
+	for _, channel := range channels {
+		delete(client.subscriptions, channel)
+		if subscribers != nil {
+			clients := subscribers[channel]
+			delete(clients, client)
+			if len(clients) == 0 {
+				delete(subscribers, channel)
+			}
+		}
+		response = append(response, rawArrayResponse([][]byte{
+			bulkString([]byte("unsubscribe")),
+			bulkString([]byte(channel)),
+			integerResponse(len(client.subscriptions)),
+		})...)
+	}
+	client.subscribed = len(client.subscriptions) > 0
+	return response
 }
 
 func unregisterClientSubscriptions(client *clientState, subscribers map[string]map[*clientState]struct{}) {
