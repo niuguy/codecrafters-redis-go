@@ -198,6 +198,19 @@ func TestKeysOnlySupportsWildcard(t *testing.T) {
 	}
 }
 
+func TestSubscribeCommand(t *testing.T) {
+	client := &clientState{}
+	if got := executeSubscribe(testRESPArguments("SUBSCRIBE", "mychan"), client); string(got) != "*3\r\n$9\r\nsubscribe\r\n$6\r\nmychan\r\n:1\r\n" {
+		t.Fatalf("SUBSCRIBE response = %q", got)
+	}
+	if got := executeSubscribe(testRESPArguments("SUBSCRIBE", "other", "mychan"), client); string(got) != "*3\r\n$9\r\nsubscribe\r\n$5\r\nother\r\n:2\r\n*3\r\n$9\r\nsubscribe\r\n$6\r\nmychan\r\n:2\r\n" {
+		t.Fatalf("multiple SUBSCRIBE response = %q", got)
+	}
+	if got := executeSubscribe(testRESPArguments("SUBSCRIBE"), client); got[0] != '-' {
+		t.Fatalf("invalid SUBSCRIBE response = %q", got)
+	}
+}
+
 func TestInitiateReplicaHandshakeSendsPing(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

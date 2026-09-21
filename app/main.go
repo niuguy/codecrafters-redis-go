@@ -128,9 +128,10 @@ type transactionContext struct {
 }
 
 type clientState struct {
-	inMulti bool
-	queue   [][]byte
-	watched map[string]uint64
+	inMulti       bool
+	queue         [][]byte
+	watched       map[string]uint64
+	subscriptions map[string]struct{}
 }
 
 type blockedRequest struct {
@@ -567,6 +568,10 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 				event.response <- discardTransaction(event.client)
 				continue
 			}
+			if isCommand(arguments[0], "SUBSCRIBE") {
+				event.response <- executeSubscribe(arguments, event.client)
+				continue
+			}
 			if event.client.inMulti {
 				event.client.queue = append(event.client.queue, cloneBytes(event.command))
 				event.response <- []byte("+QUEUED\r\n")
@@ -977,6 +982,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeType(arguments, store)
 	case isCommand(arguments[0], "KEYS"):
 		return executeKeys(arguments, store)
+	case isCommand(arguments[0], "SUBSCRIBE"):
+		return executeSubscribe(arguments, nil)
 	case isCommand(arguments[0], "CONFIG"):
 		return executeConfig(arguments)
 	case isCommand(arguments[0], "INFO"):
@@ -1526,6 +1533,30 @@ func executeKeys(arguments [][]byte, store map[string]redisValue) []byte {
 		values = append(values, []byte(key))
 	}
 	return arrayResponse(values)
+}
+
+func executeSubscribe(arguments [][]byte, client *clientState) []byte {
+	if len(arguments) < 2 {
+		return []byte("-ERR wrong number of arguments for 'subscribe' command\r\n")
+	}
+	if client == nil {
+		client = &clientState{}
+	}
+	if client.subscriptions == nil {
+		client.subscriptions = make(map[string]struct{})
+	}
+
+	response := make([]byte, 0, len(arguments)*32)
+	for _, argument := range arguments[1:] {
+		channel := string(argument)
+		client.subscriptions[channel] = struct{}{}
+		response = append(response, rawArrayResponse([][]byte{
+			bulkString([]byte("subscribe")),
+			bulkString(argument),
+			integerResponse(len(client.subscriptions)),
+		})...)
+	}
+	return response
 }
 
 const (
