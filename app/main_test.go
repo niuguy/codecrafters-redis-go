@@ -71,7 +71,7 @@ func TestParseServerConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse default config: %v", err)
 	}
-	if master.port != defaultPort || master.role() != "master" {
+	if master.port != defaultPort || master.dir != defaultDir || master.dbfilename != defaultDBFilename || master.role() != "master" {
 		t.Fatalf("default config = %+v, want port %d and master role", master, defaultPort)
 	}
 
@@ -89,6 +89,43 @@ func TestParseServerConfig(t *testing.T) {
 	}
 	if separateArguments.role() != "slave" {
 		t.Fatalf("separate replica arguments produced role %q", separateArguments.role())
+	}
+
+	custom, err := parseServerConfig([]string{
+		"--port", "6381",
+		"--dir", "/tmp/redis-data",
+		"--dbfilename", "redis.rdb",
+	})
+	if err != nil {
+		t.Fatalf("parse persistence config: %v", err)
+	}
+	if custom.dir != "/tmp/redis-data" || custom.dbfilename != "redis.rdb" {
+		t.Fatalf("persistence config = %+v", custom)
+	}
+}
+
+func TestConfigGetCommand(t *testing.T) {
+	previousDir := configuredDir
+	previousDBFilename := configuredDBFilename
+	configuredDir = "/tmp/redis-data"
+	configuredDBFilename = "redis.rdb"
+	defer func() {
+		configuredDir = previousDir
+		configuredDBFilename = previousDBFilename
+	}()
+
+	store := make(map[string]redisValue)
+	if got := execute(testRESPCommand("CONFIG", "GET", "dir"), store); string(got) != "*2\r\n$3\r\ndir\r\n$15\r\n/tmp/redis-data\r\n" {
+		t.Fatalf("CONFIG GET dir response = %q", got)
+	}
+	if got := execute(testRESPCommand("CONFIG", "GET", "DBFILENAME"), store); string(got) != "*2\r\n$10\r\ndbfilename\r\n$9\r\nredis.rdb\r\n" {
+		t.Fatalf("CONFIG GET dbfilename response = %q", got)
+	}
+	if got := execute(testRESPCommand("CONFIG", "GET", "dir", "dbfilename"), store); string(got) != "*4\r\n$3\r\ndir\r\n$15\r\n/tmp/redis-data\r\n$10\r\ndbfilename\r\n$9\r\nredis.rdb\r\n" {
+		t.Fatalf("CONFIG GET multiple response = %q", got)
+	}
+	if got := execute(testRESPCommand("CONFIG", "GET", "unknown"), store); string(got) != "*0\r\n" {
+		t.Fatalf("CONFIG GET unknown response = %q", got)
 	}
 }
 

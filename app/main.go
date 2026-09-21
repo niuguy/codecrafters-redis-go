@@ -19,11 +19,17 @@ import (
 	"time"
 )
 
-const defaultPort = 6379
+const (
+	defaultPort       = 6379
+	defaultDir        = "."
+	defaultDBFilename = "dump.rdb"
+)
 
 var masterReplicationID = newReplicationID()
 var serverRole = "master"
 var replicaMasterConn net.Conn
+var configuredDir = defaultDir
+var configuredDBFilename = defaultDBFilename
 
 var replicationPing = []byte("*1\r\n$4\r\nPING\r\n")
 
@@ -32,8 +38,10 @@ const emptyRDBBase64 = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoF
 var emptyRDB = mustDecodeBase64(emptyRDBBase64)
 
 type serverConfig struct {
-	port      int
-	replicaOf string
+	port       int
+	replicaOf  string
+	dir        string
+	dbfilename string
 }
 
 var pong = []byte("+PONG\r\n")
@@ -147,6 +155,8 @@ func main() {
 		log.Fatal(err)
 	}
 	serverRole = config.role()
+	configuredDir = config.dir
+	configuredDBFilename = config.dbfilename
 	address := net.JoinHostPort("0.0.0.0", strconv.Itoa(config.port))
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
@@ -185,7 +195,11 @@ func parsePort(arguments []string) (int, error) {
 }
 
 func parseServerConfig(arguments []string) (serverConfig, error) {
-	config := serverConfig{port: defaultPort}
+	config := serverConfig{
+		port:       defaultPort,
+		dir:        defaultDir,
+		dbfilename: defaultDBFilename,
+	}
 	for position := 0; position < len(arguments); {
 		switch arguments[position] {
 		case "--port":
@@ -216,8 +230,20 @@ func parseServerConfig(arguments []string) (serverConfig, error) {
 			}
 			config.replicaOf = strings.Join(replicaOf, " ")
 			position += consumed
+		case "--dir":
+			if position+1 >= len(arguments) || strings.HasPrefix(arguments[position+1], "--") {
+				return serverConfig{}, errors.New("usage: your_program --dir <path>")
+			}
+			config.dir = arguments[position+1]
+			position += 2
+		case "--dbfilename":
+			if position+1 >= len(arguments) || strings.HasPrefix(arguments[position+1], "--") {
+				return serverConfig{}, errors.New("usage: your_program --dbfilename <filename>")
+			}
+			config.dbfilename = arguments[position+1]
+			position += 2
 		default:
-			return serverConfig{}, errors.New("usage: your_program [--port <port>] [--replicaof \"<host> <port>\"]")
+			return serverConfig{}, errors.New("usage: your_program [--port <port>] [--replicaof \"<host> <port>\"] [--dir <path>] [--dbfilename <filename>]")
 		}
 	}
 	return config, nil
@@ -910,6 +936,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeLLen(arguments, store)
 	case isCommand(arguments[0], "TYPE"):
 		return executeType(arguments, store)
+	case isCommand(arguments[0], "CONFIG"):
+		return executeConfig(arguments)
 	case isCommand(arguments[0], "INFO"):
 		return executeInfo(arguments, store)
 	case isCommand(arguments[0], "REPLCONF"):
@@ -1437,6 +1465,29 @@ func executeType(arguments [][]byte, store map[string]redisValue) []byte {
 		return simpleString("none")
 	}
 	return simpleString(value.kind.String())
+}
+
+func executeConfig(arguments [][]byte) []byte {
+	if len(arguments) < 3 || !isCommand(arguments[1], "GET") {
+		return []byte("-ERR wrong number of arguments for 'config get' command\r\n")
+	}
+
+	values := make([][]byte, 0, (len(arguments)-2)*2)
+	for _, argument := range arguments[2:] {
+		key := strings.ToLower(string(argument))
+		switch key {
+		case "dir":
+			values = append(values, []byte("dir"), []byte(configuredDir))
+		case "dbfilename":
+			values = append(values, []byte("dbfilename"), []byte(configuredDBFilename))
+		case "*":
+			values = append(values,
+				[]byte("dir"), []byte(configuredDir),
+				[]byte("dbfilename"), []byte(configuredDBFilename),
+			)
+		}
+	}
+	return arrayResponse(values)
 }
 
 func executeInfo(arguments [][]byte, store map[string]redisValue) []byte {
