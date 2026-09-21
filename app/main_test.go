@@ -231,6 +231,32 @@ func TestSubscribeCommand(t *testing.T) {
 	}
 }
 
+func TestPublishCommandCountsSubscribers(t *testing.T) {
+	first := &clientState{}
+	second := &clientState{}
+	subscribers := make(map[string]map[*clientState]struct{})
+	firstChannels := testRESPArguments("SUBSCRIBE", "mychan")
+	secondChannels := testRESPArguments("SUBSCRIBE", "mychan", "other")
+	executeSubscribe(firstChannels, first)
+	executeSubscribe(secondChannels, second)
+	registerClientSubscriptions(first, firstChannels[1:], subscribers)
+	registerClientSubscriptions(second, secondChannels[1:], subscribers)
+
+	if got := executePublish(testRESPArguments("PUBLISH", "mychan", "hello"), subscribers); string(got) != ":2\r\n" {
+		t.Fatalf("PUBLISH subscriber count = %q", got)
+	}
+	if got := executePublish(testRESPArguments("PUBLISH", "other", "hello"), subscribers); string(got) != ":1\r\n" {
+		t.Fatalf("PUBLISH other subscriber count = %q", got)
+	}
+	unregisterClientSubscriptions(second, subscribers)
+	if got := executePublish(testRESPArguments("PUBLISH", "mychan", "hello"), subscribers); string(got) != ":1\r\n" {
+		t.Fatalf("PUBLISH count after disconnect = %q", got)
+	}
+	if got := executePublish(testRESPArguments("PUBLISH", "mychan"), subscribers); got[0] != '-' {
+		t.Fatalf("invalid PUBLISH response = %q", got)
+	}
+}
+
 func TestInitiateReplicaHandshakeSendsPing(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

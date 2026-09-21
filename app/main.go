@@ -466,6 +466,7 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 	versions := make(map[string]uint64)
 	waiters := make(map[string][]*blockedRequest)
 	streamWaiters := make(map[string][]*blockedStreamRequest)
+	subscribers := make(map[string]map[*clientState]struct{})
 	replicas := make(map[net.Conn]struct{})
 	replicaOffsets := make(map[net.Conn]int64)
 	waitRequests := make([]*replicationWaitRequest, 0)
@@ -474,6 +475,7 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 
 	for event := range events {
 		if event.disconnect {
+			unregisterClientSubscriptions(event.client, subscribers)
 			delete(replicas, event.connection)
 			delete(replicaOffsets, event.connection)
 			wakeReplicationWaiters(&waitRequests, replicas, replicaOffsets)
@@ -579,7 +581,9 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 				continue
 			}
 			if isCommand(arguments[0], "SUBSCRIBE") {
-				event.response <- executeSubscribe(arguments, event.client)
+				response := executeSubscribe(arguments, event.client)
+				registerClientSubscriptions(event.client, arguments[1:], subscribers)
+				event.response <- response
 				continue
 			}
 			if event.client.inMulti {
@@ -598,6 +602,10 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 		}
 		if err == nil && len(arguments) > 0 && isCommand(arguments[0], "WAIT") {
 			handleWait(event, arguments, replicas, replicaOffsets, lastWriteOffset, &waitRequests, events, &replicationOffset)
+			continue
+		}
+		if err == nil && len(arguments) > 0 && isCommand(arguments[0], "PUBLISH") {
+			event.response <- executePublish(arguments, subscribers)
 			continue
 		}
 
@@ -994,6 +1002,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeKeys(arguments, store)
 	case isCommand(arguments[0], "SUBSCRIBE"):
 		return executeSubscribe(arguments, nil)
+	case isCommand(arguments[0], "PUBLISH"):
+		return executePublish(arguments, nil)
 	case isCommand(arguments[0], "CONFIG"):
 		return executeConfig(arguments)
 	case isCommand(arguments[0], "INFO"):
@@ -1568,6 +1578,39 @@ func executeSubscribe(arguments [][]byte, client *clientState) []byte {
 		})...)
 	}
 	return response
+}
+
+func registerClientSubscriptions(client *clientState, channels [][]byte, subscribers map[string]map[*clientState]struct{}) {
+	if client == nil {
+		return
+	}
+	for _, channel := range channels {
+		name := string(channel)
+		if subscribers[name] == nil {
+			subscribers[name] = make(map[*clientState]struct{})
+		}
+		subscribers[name][client] = struct{}{}
+	}
+}
+
+func unregisterClientSubscriptions(client *clientState, subscribers map[string]map[*clientState]struct{}) {
+	if client == nil {
+		return
+	}
+	for channel := range client.subscriptions {
+		clients := subscribers[channel]
+		delete(clients, client)
+		if len(clients) == 0 {
+			delete(subscribers, channel)
+		}
+	}
+}
+
+func executePublish(arguments [][]byte, subscribers map[string]map[*clientState]struct{}) []byte {
+	if len(arguments) != 3 {
+		return []byte("-ERR wrong number of arguments for 'publish' command\r\n")
+	}
+	return integerResponse(len(subscribers[string(arguments[1])]))
 }
 
 func allowedInSubscribedMode(command []byte) bool {
@@ -2315,12 +2358,12 @@ func readRESPFrame(reader *bufio.Reader) ([]byte, error) {
 }
 
 func handleConn(conn net.Conn, events chan<- commandEvent) {
+	client := &clientState{}
 	defer func() {
-		events <- commandEvent{connection: conn, disconnect: true}
+		events <- commandEvent{connection: conn, client: client, disconnect: true}
 		_ = conn.Close()
 	}()
 
-	client := &clientState{}
 	// Buffer one response so the event loop does not wait for the connection
 	// goroutine to receive before it can process another client.
 	response := make(chan []byte, 1)
