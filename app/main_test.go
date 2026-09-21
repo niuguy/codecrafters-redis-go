@@ -340,6 +340,9 @@ func TestWaitCommand(t *testing.T) {
 	if got := execute(testRESPCommand("WAIT", "2", "1"), store); string(got) != ":0\r\n" {
 		t.Fatalf("WAIT with no tracked replicas response = %q", got)
 	}
+	if got := execute(testRESPCommand("WAIT", "9", "500"), store, 7); string(got) != ":7\r\n" {
+		t.Fatalf("WAIT with connected replicas response = %q", got)
+	}
 	for _, command := range [][]string{
 		{"WAIT"},
 		{"WAIT", "nope", "1000"},

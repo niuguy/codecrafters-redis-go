@@ -90,6 +90,7 @@ type commandEvent struct {
 	client        *clientState
 	connection    net.Conn
 	fromReplica   bool
+	disconnect    bool
 	blocked       *blockedRequest
 	blockedStream *blockedStreamRequest
 	expiration    *expirationEvent
@@ -391,6 +392,11 @@ func runEventLoop(events chan commandEvent) {
 	replicaOffsets := make(map[net.Conn]int64)
 
 	for event := range events {
+		if event.disconnect {
+			delete(replicas, event.connection)
+			delete(replicaOffsets, event.connection)
+			continue
+		}
 		if event.expiration != nil {
 			applyExpiration(event.expiration, store, versions)
 			continue
@@ -462,7 +468,7 @@ func runEventLoop(events chan commandEvent) {
 			continue
 		}
 
-		response := execute(event.command, store)
+		response := execute(event.command, store, len(replicas))
 		if err == nil {
 			touchModifiedKeys(arguments, response, versions)
 			scheduleExpiration(arguments, response, versions, events)
@@ -555,7 +561,7 @@ func executeTransaction(client *clientState, store map[string]redisValue, versio
 	replies := make([][]byte, 0, len(queued))
 	for _, command := range queued {
 		arguments, err := parseRESPCommand(command)
-		response := execute(command, store)
+		response := execute(command, store, len(context.replicas))
 		replies = append(replies, response)
 		if err == nil {
 			touchModifiedKeys(arguments, response, versions)
@@ -674,10 +680,14 @@ func isListPush(arguments [][]byte) bool {
 		(isCommand(arguments[0], "RPUSH") || isCommand(arguments[0], "LPUSH"))
 }
 
-func execute(command []byte, store map[string]redisValue) []byte {
+func execute(command []byte, store map[string]redisValue, connectedReplicas ...int) []byte {
 	arguments, err := parseRESPCommand(command)
 	if err != nil || len(arguments) == 0 {
 		return []byte("-ERR protocol error\r\n")
+	}
+	replicaCount := 0
+	if len(connectedReplicas) > 0 {
+		replicaCount = connectedReplicas[0]
 	}
 
 	switch {
@@ -712,7 +722,7 @@ func execute(command []byte, store map[string]redisValue) []byte {
 	case isCommand(arguments[0], "PSYNC"):
 		return executePSync(arguments)
 	case isCommand(arguments[0], "WAIT"):
-		return executeWait(arguments)
+		return executeWait(arguments, replicaCount)
 	case isCommand(arguments[0], "XADD"):
 		return executeXAdd(arguments, store)
 	case isCommand(arguments[0], "XRANGE"):
@@ -1294,7 +1304,7 @@ func executePSync(arguments [][]byte) []byte {
 	return append(response, rdbBulkString(emptyRDB)...)
 }
 
-func executeWait(arguments [][]byte) []byte {
+func executeWait(arguments [][]byte, connectedReplicaCounts ...int) []byte {
 	if len(arguments) != 3 {
 		return []byte("-ERR wrong number of arguments for 'wait' command\r\n")
 	}
@@ -1306,8 +1316,13 @@ func executeWait(arguments [][]byte) []byte {
 	if err != nil || timeout < 0 {
 		return []byte("-ERR timeout is not an integer or out of range\r\n")
 	}
+	connectedReplicas := 0
+	if len(connectedReplicaCounts) > 0 {
+		connectedReplicas = connectedReplicaCounts[0]
+	}
+	_ = numReplicas
 	_ = timeout
-	return integer64Response(0)
+	return integerResponse(connectedReplicas)
 }
 
 func rdbBulkString(value []byte) []byte {
@@ -1747,7 +1762,10 @@ func readRESPFrame(reader *bufio.Reader) ([]byte, error) {
 }
 
 func handleConn(conn net.Conn, events chan<- commandEvent) {
-	defer conn.Close()
+	defer func() {
+		events <- commandEvent{connection: conn, disconnect: true}
+		_ = conn.Close()
+	}()
 
 	client := &clientState{}
 	// Buffer one response so the event loop does not wait for the connection
