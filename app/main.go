@@ -711,6 +711,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeReplConf(arguments)
 	case isCommand(arguments[0], "PSYNC"):
 		return executePSync(arguments)
+	case isCommand(arguments[0], "WAIT"):
+		return executeWait(arguments)
 	case isCommand(arguments[0], "XADD"):
 		return executeXAdd(arguments, store)
 	case isCommand(arguments[0], "XRANGE"):
@@ -1290,6 +1292,22 @@ func executePSync(arguments [][]byte) []byte {
 	}
 	response := simpleString("FULLRESYNC " + masterReplicationID + " 0")
 	return append(response, rdbBulkString(emptyRDB)...)
+}
+
+func executeWait(arguments [][]byte) []byte {
+	if len(arguments) != 3 {
+		return []byte("-ERR wrong number of arguments for 'wait' command\r\n")
+	}
+	numReplicas, err := strconv.ParseInt(string(arguments[1]), 10, 64)
+	if err != nil || numReplicas < 0 {
+		return []byte("-ERR numreplicas is not an integer or out of range\r\n")
+	}
+	timeout, err := strconv.ParseInt(string(arguments[2]), 10, 64)
+	if err != nil || timeout < 0 {
+		return []byte("-ERR timeout is not an integer or out of range\r\n")
+	}
+	_ = timeout
+	return integer64Response(0)
 }
 
 func rdbBulkString(value []byte) []byte {

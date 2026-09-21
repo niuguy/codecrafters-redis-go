@@ -332,6 +332,25 @@ func TestAdvanceReplicaOffset(t *testing.T) {
 	}
 }
 
+func TestWaitCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	if got := execute(testRESPCommand("WAIT", "0", "1000"), store); string(got) != ":0\r\n" {
+		t.Fatalf("WAIT 0 response = %q", got)
+	}
+	if got := execute(testRESPCommand("WAIT", "2", "1"), store); string(got) != ":0\r\n" {
+		t.Fatalf("WAIT with no tracked replicas response = %q", got)
+	}
+	for _, command := range [][]string{
+		{"WAIT"},
+		{"WAIT", "nope", "1000"},
+		{"WAIT", "0", "-1"},
+	} {
+		if got := execute(testRESPCommand(command...), store); got[0] != '-' {
+			t.Errorf("invalid WAIT %v response = %q", command[1:], got)
+		}
+	}
+}
+
 func TestSetExpirationValidation(t *testing.T) {
 	cases := []struct {
 		name       string
