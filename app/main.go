@@ -388,6 +388,7 @@ func runEventLoop(events chan commandEvent) {
 	waiters := make(map[string][]*blockedRequest)
 	streamWaiters := make(map[string][]*blockedStreamRequest)
 	replicas := make(map[net.Conn]struct{})
+	replicaOffsets := make(map[net.Conn]int64)
 
 	for event := range events {
 		if event.expiration != nil {
@@ -405,11 +406,21 @@ func runEventLoop(events chan commandEvent) {
 
 		arguments, err := parseRESPCommand(event.command)
 		if event.fromReplica {
-			if err == nil {
-				response := execute(event.command, store)
-				touchModifiedKeys(arguments, response, versions)
-				scheduleExpiration(arguments, response, versions, events)
-				wakeAfterCommand(arguments, store, waiters, streamWaiters)
+			if err != nil {
+				continue
+			}
+			if isReplConfGetAck(arguments) {
+				if event.connection != nil {
+					_, _ = event.connection.Write(replConfAckResponse(replicaOffsets[event.connection]))
+				}
+				continue
+			}
+			response := execute(event.command, store)
+			touchModifiedKeys(arguments, response, versions)
+			scheduleExpiration(arguments, response, versions, events)
+			wakeAfterCommand(arguments, store, waiters, streamWaiters)
+			if event.connection != nil {
+				replicaOffsets[event.connection] += int64(len(event.command))
 			}
 			continue
 		}
@@ -636,6 +647,17 @@ func propagateCommand(command []byte, arguments [][]byte, response []byte, repli
 			_ = connection.Close()
 		}
 	}
+}
+
+func isReplConfGetAck(arguments [][]byte) bool {
+	return len(arguments) == 3 &&
+		isCommand(arguments[0], "REPLCONF") &&
+		isCommand(arguments[1], "GETACK") &&
+		bytes.Equal(arguments[2], []byte("*"))
+}
+
+func replConfAckResponse(offset int64) []byte {
+	return encodeRESPCommand("REPLCONF", "ACK", strconv.FormatInt(offset, 10))
 }
 
 func isCommand(value []byte, name string) bool {

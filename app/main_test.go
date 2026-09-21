@@ -296,6 +296,20 @@ func TestPropagateWriteCommand(t *testing.T) {
 	}
 }
 
+func TestReplConfGetAck(t *testing.T) {
+	arguments := testRESPArguments("REPLCONF", "GETACK", "*")
+	if !isReplConfGetAck(arguments) {
+		t.Fatal("GETACK command was not recognized")
+	}
+	want := testRESPCommand("REPLCONF", "ACK", "123")
+	if got := replConfAckResponse(123); !bytes.Equal(got, want) {
+		t.Fatalf("ACK response = %q, want %q", got, want)
+	}
+	if isReplConfGetAck(testRESPArguments("REPLCONF", "GETACK", "0")) {
+		t.Fatal("GETACK with a non-wildcard offset was recognized")
+	}
+}
+
 func TestSetExpirationValidation(t *testing.T) {
 	cases := []struct {
 		name       string
