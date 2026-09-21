@@ -310,6 +310,83 @@ func TestReplConfGetAck(t *testing.T) {
 	}
 }
 
+func TestReplConfAckParsing(t *testing.T) {
+	if !isReplConfAck(testRESPArguments("REPLCONF", "ACK", "123")) {
+		t.Fatal("valid REPLCONF ACK was not recognized")
+	}
+	if got := parseReplicaAckOffset(testRESPArguments("REPLCONF", "ACK", "123")); got != 123 {
+		t.Fatalf("ACK offset = %d, want 123", got)
+	}
+	for _, arguments := range [][]byte{
+		testRESPCommand("REPLCONF", "ACK", "-1"),
+		testRESPCommand("REPLCONF", "ACK", "nope"),
+	} {
+		parsed, err := parseRESPCommand(arguments)
+		if err != nil {
+			t.Fatalf("parse ACK test command: %v", err)
+		}
+		if isReplConfAck(parsed) {
+			t.Errorf("invalid ACK %q was recognized", arguments)
+		}
+	}
+}
+
+func TestReplicationWaitSendsGetAckAndCompletes(t *testing.T) {
+	masterSide, replicaSide := net.Pipe()
+	defer masterSide.Close()
+	defer replicaSide.Close()
+
+	getAck := encodeRESPCommand("REPLCONF", "GETACK", "*")
+	received := make(chan []byte, 1)
+	go func() {
+		frame := make([]byte, len(getAck))
+		if _, err := io.ReadFull(replicaSide, frame); err == nil {
+			received <- frame
+		}
+	}()
+
+	replicas := map[net.Conn]struct{}{masterSide: {}}
+	offsets := map[net.Conn]int64{masterSide: 0}
+	requests := make([]*replicationWaitRequest, 0, 1)
+	response := make(chan []byte, 1)
+	events := make(chan commandEvent, 1)
+	var replicationOffset int64
+
+	handleWait(
+		commandEvent{response: response},
+		testRESPArguments("WAIT", "1", "1000"),
+		replicas,
+		offsets,
+		10,
+		&requests,
+		events,
+		&replicationOffset,
+	)
+
+	select {
+	case frame := <-received:
+		if !bytes.Equal(frame, getAck) {
+			t.Fatalf("GETACK frame = %q, want %q", frame, getAck)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for GETACK")
+	}
+	if got := replicationOffset; got != int64(len(getAck)) {
+		t.Fatalf("replication offset after GETACK = %d, want %d", got, len(getAck))
+	}
+
+	offsets[masterSide] = 10
+	wakeReplicationWaiters(&requests, replicas, offsets)
+	select {
+	case got := <-response:
+		if string(got) != ":1\r\n" {
+			t.Fatalf("WAIT response = %q, want :1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for WAIT response")
+	}
+}
+
 func TestAdvanceReplicaOffset(t *testing.T) {
 	masterSide, replicaSide := net.Pipe()
 	defer masterSide.Close()

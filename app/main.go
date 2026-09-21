@@ -93,12 +93,15 @@ type commandEvent struct {
 	disconnect    bool
 	blocked       *blockedRequest
 	blockedStream *blockedStreamRequest
+	wait          *replicationWaitRequest
 	expiration    *expirationEvent
 }
 
 type transactionContext struct {
-	events   chan<- commandEvent
-	replicas map[net.Conn]struct{}
+	events            chan<- commandEvent
+	replicas          map[net.Conn]struct{}
+	replicationOffset *int64
+	lastWriteOffset   *int64
 }
 
 type clientState struct {
@@ -120,6 +123,14 @@ type blockedStreamRequest struct {
 	ids   []streamID
 	done  bool
 	timer *time.Timer
+}
+
+type replicationWaitRequest struct {
+	event    commandEvent
+	target   int64
+	required int64
+	done     bool
+	timer    *time.Timer
 }
 
 type expirationEvent struct {
@@ -390,11 +401,15 @@ func runEventLoop(events chan commandEvent) {
 	streamWaiters := make(map[string][]*blockedStreamRequest)
 	replicas := make(map[net.Conn]struct{})
 	replicaOffsets := make(map[net.Conn]int64)
+	waitRequests := make([]*replicationWaitRequest, 0)
+	var replicationOffset int64
+	var lastWriteOffset int64
 
 	for event := range events {
 		if event.disconnect {
 			delete(replicas, event.connection)
 			delete(replicaOffsets, event.connection)
+			wakeReplicationWaiters(&waitRequests, replicas, replicaOffsets)
 			continue
 		}
 		if event.expiration != nil {
@@ -409,10 +424,26 @@ func runEventLoop(events chan commandEvent) {
 			expireBlockedStreamRequest(event.blockedStream, streamWaiters)
 			continue
 		}
+		if event.wait != nil {
+			expireReplicationWait(event.wait, &waitRequests, replicas, replicaOffsets)
+			continue
+		}
 
 		arguments, err := parseRESPCommand(event.command)
 		if event.fromReplica {
 			if err != nil {
+				continue
+			}
+			if isReplConfAck(arguments) {
+				if event.connection != nil {
+					if _, ok := replicas[event.connection]; ok {
+						offset := parseReplicaAckOffset(arguments)
+						if offset > replicaOffsets[event.connection] {
+							replicaOffsets[event.connection] = offset
+						}
+						wakeReplicationWaiters(&waitRequests, replicas, replicaOffsets)
+					}
+				}
 				continue
 			}
 			if isReplConfGetAck(arguments) {
@@ -429,6 +460,22 @@ func runEventLoop(events chan commandEvent) {
 			advanceReplicaOffset(replicaOffsets, event.connection, event.command)
 			continue
 		}
+		if event.connection != nil {
+			if _, isReplica := replicas[event.connection]; isReplica {
+				if isReplConfAck(arguments) {
+					offset := parseReplicaAckOffset(arguments)
+					if offset > replicaOffsets[event.connection] {
+						replicaOffsets[event.connection] = offset
+					}
+					wakeReplicationWaiters(&waitRequests, replicas, replicaOffsets)
+				}
+				// ACKs are protocol messages on the replication connection, not
+				// client commands. Send an empty response so handleConn can read
+				// the next frame without writing anything back to the replica.
+				event.response <- nil
+				continue
+			}
+		}
 		if err == nil && event.client != nil {
 			if isCommand(arguments[0], "WATCH") {
 				event.response <- watchKeys(arguments, event.client, versions)
@@ -444,8 +491,10 @@ func runEventLoop(events chan commandEvent) {
 			}
 			if isCommand(arguments[0], "EXEC") {
 				event.response <- executeTransaction(event.client, store, versions, waiters, streamWaiters, &transactionContext{
-					events:   events,
-					replicas: replicas,
+					events:            events,
+					replicas:          replicas,
+					replicationOffset: &replicationOffset,
+					lastWriteOffset:   &lastWriteOffset,
 				})
 				continue
 			}
@@ -467,6 +516,10 @@ func runEventLoop(events chan commandEvent) {
 			handleBlockingXRead(event, arguments, store, streamWaiters, events)
 			continue
 		}
+		if err == nil && len(arguments) > 0 && isCommand(arguments[0], "WAIT") {
+			handleWait(event, arguments, replicas, replicaOffsets, lastWriteOffset, &waitRequests, events, &replicationOffset)
+			continue
+		}
 
 		response := execute(event.command, store, len(replicas))
 		if err == nil {
@@ -475,7 +528,12 @@ func runEventLoop(events chan commandEvent) {
 			wakeAfterCommand(arguments, store, waiters, streamWaiters)
 			if isCommand(arguments[0], "PSYNC") && event.connection != nil {
 				replicas[event.connection] = struct{}{}
+				replicaOffsets[event.connection] = 0
 			} else {
+				if shouldPropagateCommand(arguments, response) {
+					replicationOffset += int64(len(event.command))
+					lastWriteOffset = replicationOffset
+				}
 				propagateCommand(event.command, arguments, response, replicas)
 			}
 		}
@@ -567,6 +625,12 @@ func executeTransaction(client *clientState, store map[string]redisValue, versio
 			touchModifiedKeys(arguments, response, versions)
 			scheduleExpiration(arguments, response, versions, context.events)
 			wakeAfterCommand(arguments, store, waiters, streamWaiters)
+			if shouldPropagateCommand(arguments, response) && context.replicationOffset != nil {
+				*context.replicationOffset += int64(len(command))
+				if context.lastWriteOffset != nil {
+					*context.lastWriteOffset = *context.replicationOffset
+				}
+			}
 			propagateCommand(command, arguments, response, context.replicas)
 		}
 	}
@@ -618,6 +682,19 @@ func touchModifiedKeys(arguments [][]byte, response []byte, versions map[string]
 	}
 }
 
+func shouldPropagateCommand(arguments [][]byte, response []byte) bool {
+	if !isWriteCommand(arguments) || len(response) == 0 || response[0] == '-' {
+		return false
+	}
+	if isCommand(arguments[0], "LPOP") &&
+		(bytes.Equal(response, []byte("$-1\r\n")) ||
+			bytes.Equal(response, []byte("*-1\r\n")) ||
+			bytes.Equal(response, []byte("*0\r\n"))) {
+		return false
+	}
+	return true
+}
+
 func isWriteCommand(arguments [][]byte) bool {
 	if len(arguments) == 0 {
 		return false
@@ -637,13 +714,7 @@ func isWriteCommand(arguments [][]byte) bool {
 }
 
 func propagateCommand(command []byte, arguments [][]byte, response []byte, replicas map[net.Conn]struct{}) {
-	if !isWriteCommand(arguments) || len(response) == 0 || response[0] == '-' {
-		return
-	}
-	if isCommand(arguments[0], "LPOP") &&
-		(bytes.Equal(response, []byte("$-1\r\n")) ||
-			bytes.Equal(response, []byte("*-1\r\n")) ||
-			bytes.Equal(response, []byte("*0\r\n"))) {
+	if !shouldPropagateCommand(arguments, response) {
 		return
 	}
 	for connection := range replicas {
@@ -652,6 +723,130 @@ func propagateCommand(command []byte, arguments [][]byte, response []byte, repli
 			_ = connection.Close()
 		}
 	}
+}
+
+func isReplConfAck(arguments [][]byte) bool {
+	if len(arguments) != 3 ||
+		!isCommand(arguments[0], "REPLCONF") ||
+		!isCommand(arguments[1], "ACK") {
+		return false
+	}
+	offset, err := strconv.ParseInt(string(arguments[2]), 10, 64)
+	return err == nil && offset >= 0
+}
+
+func parseReplicaAckOffset(arguments [][]byte) int64 {
+	offset, _ := strconv.ParseInt(string(arguments[2]), 10, 64)
+	return offset
+}
+
+func requestReplicaAcks(replicas map[net.Conn]struct{}, replicationOffset *int64) {
+	command := encodeRESPCommand("REPLCONF", "GETACK", "*")
+	sent := false
+	for connection := range replicas {
+		if _, err := connection.Write(command); err != nil {
+			delete(replicas, connection)
+			_ = connection.Close()
+			continue
+		}
+		sent = true
+	}
+	if sent && replicationOffset != nil {
+		*replicationOffset += int64(len(command))
+	}
+}
+
+func countAcknowledgedReplicas(replicas map[net.Conn]struct{}, offsets map[net.Conn]int64, target int64) int {
+	count := 0
+	for connection := range replicas {
+		if offsets[connection] >= target {
+			count++
+		}
+	}
+	return count
+}
+
+func handleWait(event commandEvent, arguments [][]byte, replicas map[net.Conn]struct{}, offsets map[net.Conn]int64, target int64, requests *[]*replicationWaitRequest, events chan<- commandEvent, replicationOffset *int64) {
+	required, timeout, errorResponse := parseWaitArguments(arguments)
+	if errorResponse != nil {
+		event.response <- errorResponse
+		return
+	}
+
+	acknowledged := countAcknowledgedReplicas(replicas, offsets, target)
+	if target == 0 || int64(acknowledged) >= required {
+		event.response <- integerResponse(acknowledged)
+		return
+	}
+
+	request := &replicationWaitRequest{
+		event:    event,
+		target:   target,
+		required: required,
+	}
+	*requests = append(*requests, request)
+	request.timer = time.AfterFunc(time.Duration(timeout)*time.Millisecond, func() {
+		events <- commandEvent{wait: request}
+	})
+	requestReplicaAcks(replicas, replicationOffset)
+	wakeReplicationWaiters(requests, replicas, offsets)
+}
+
+func parseWaitArguments(arguments [][]byte) (int64, int64, []byte) {
+	if len(arguments) != 3 {
+		return 0, 0, []byte("-ERR wrong number of arguments for 'wait' command\r\n")
+	}
+	required, err := strconv.ParseInt(string(arguments[1]), 10, 64)
+	if err != nil || required < 0 {
+		return 0, 0, []byte("-ERR numreplicas is not an integer or out of range\r\n")
+	}
+	timeout, err := strconv.ParseInt(string(arguments[2]), 10, 64)
+	if err != nil || timeout < 0 {
+		return 0, 0, []byte("-ERR timeout is not an integer or out of range\r\n")
+	}
+	return required, timeout, nil
+}
+
+func wakeReplicationWaiters(requests *[]*replicationWaitRequest, replicas map[net.Conn]struct{}, offsets map[net.Conn]int64) {
+	active := (*requests)[:0]
+	for _, request := range *requests {
+		if request == nil || request.done {
+			continue
+		}
+		acknowledged := countAcknowledgedReplicas(replicas, offsets, request.target)
+		if int64(acknowledged) >= request.required {
+			completeReplicationWait(request, acknowledged)
+			continue
+		}
+		active = append(active, request)
+	}
+	*requests = active
+}
+
+func completeReplicationWait(request *replicationWaitRequest, acknowledged int) {
+	if request.done {
+		return
+	}
+	request.done = true
+	if request.timer != nil {
+		request.timer.Stop()
+	}
+	request.event.response <- integerResponse(acknowledged)
+}
+
+func expireReplicationWait(request *replicationWaitRequest, requests *[]*replicationWaitRequest, replicas map[net.Conn]struct{}, offsets map[net.Conn]int64) {
+	if request == nil || request.done {
+		return
+	}
+	acknowledged := countAcknowledgedReplicas(replicas, offsets, request.target)
+	completeReplicationWait(request, acknowledged)
+	active := (*requests)[:0]
+	for _, current := range *requests {
+		if current != request && current != nil && !current.done {
+			active = append(active, current)
+		}
+	}
+	*requests = active
 }
 
 func isReplConfGetAck(arguments [][]byte) bool {
@@ -1305,23 +1500,14 @@ func executePSync(arguments [][]byte) []byte {
 }
 
 func executeWait(arguments [][]byte, connectedReplicaCounts ...int) []byte {
-	if len(arguments) != 3 {
-		return []byte("-ERR wrong number of arguments for 'wait' command\r\n")
-	}
-	numReplicas, err := strconv.ParseInt(string(arguments[1]), 10, 64)
-	if err != nil || numReplicas < 0 {
-		return []byte("-ERR numreplicas is not an integer or out of range\r\n")
-	}
-	timeout, err := strconv.ParseInt(string(arguments[2]), 10, 64)
-	if err != nil || timeout < 0 {
-		return []byte("-ERR timeout is not an integer or out of range\r\n")
+	_, _, errorResponse := parseWaitArguments(arguments)
+	if errorResponse != nil {
+		return errorResponse
 	}
 	connectedReplicas := 0
 	if len(connectedReplicaCounts) > 0 {
 		connectedReplicas = connectedReplicaCounts[0]
 	}
-	_ = numReplicas
-	_ = timeout
 	return integerResponse(connectedReplicas)
 }
 
