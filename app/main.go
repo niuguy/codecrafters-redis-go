@@ -88,9 +88,16 @@ type commandEvent struct {
 	command       []byte
 	response      chan []byte
 	client        *clientState
+	connection    net.Conn
+	fromReplica   bool
 	blocked       *blockedRequest
 	blockedStream *blockedStreamRequest
 	expiration    *expirationEvent
+}
+
+type transactionContext struct {
+	events   chan<- commandEvent
+	replicas map[net.Conn]struct{}
 }
 
 type clientState struct {
@@ -134,12 +141,11 @@ func main() {
 		log.Fatalf("Failed to bind to port %d: %v", config.port, err)
 	}
 	defer listener.Close()
-	if config.replicaOf != "" {
-		go initiateReplicaHandshake(config.replicaOf, config.port)
-	}
-
 	events := make(chan commandEvent)
 	go runEventLoop(events)
+	if config.replicaOf != "" {
+		go initiateReplicaHandshakeWithEvents(config.replicaOf, config.port, events)
+	}
 
 	for {
 		conn, err := listener.Accept()
@@ -213,6 +219,14 @@ func (config serverConfig) role() string {
 }
 
 func initiateReplicaHandshake(replicaOf string, listeningPorts ...int) {
+	listeningPort := defaultPort
+	if len(listeningPorts) > 0 {
+		listeningPort = listeningPorts[0]
+	}
+	initiateReplicaHandshakeWithEvents(replicaOf, listeningPort, nil)
+}
+
+func initiateReplicaHandshakeWithEvents(replicaOf string, listeningPort int, events chan<- commandEvent) {
 	address, err := replicaAddress(replicaOf)
 	if err != nil {
 		log.Println("Invalid replica master address:", err)
@@ -237,10 +251,6 @@ func initiateReplicaHandshake(replicaOf string, listeningPorts ...int) {
 			continue
 		}
 
-		listeningPort := defaultPort
-		if len(listeningPorts) > 0 {
-			listeningPort = listeningPorts[0]
-		}
 		commands := [][]byte{
 			encodeRESPCommand("REPLCONF", "listening-port", strconv.Itoa(listeningPort)),
 			encodeRESPCommand("REPLCONF", "capa", "psync2"),
@@ -262,12 +272,54 @@ func initiateReplicaHandshake(replicaOf string, listeningPorts ...int) {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
+		if err := readFullResync(reader); err != nil {
+			_ = connection.Close()
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 		if err := connection.SetDeadline(time.Time{}); err != nil {
 			_ = connection.Close()
 			continue
 		}
 		replicaMasterConn = connection
+		if events != nil {
+			go receiveReplicaCommands(connection, reader, events)
+		}
 		return
+	}
+}
+
+func readFullResync(reader *bufio.Reader) error {
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(response, "+FULLRESYNC ") || !strings.HasSuffix(response, "\r\n") {
+		return fmt.Errorf("unexpected full resync response %q", response)
+	}
+	header, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if len(header) < 4 || header[0] != '$' || !strings.HasSuffix(header, "\r\n") {
+		return fmt.Errorf("invalid RDB bulk string header %q", header)
+	}
+	length, err := strconv.Atoi(strings.TrimSuffix(header[1:], "\r\n"))
+	if err != nil || length < 0 {
+		return fmt.Errorf("invalid RDB length %q", header)
+	}
+	contents := make([]byte, length)
+	_, err = io.ReadFull(reader, contents)
+	return err
+}
+
+func receiveReplicaCommands(connection net.Conn, reader *bufio.Reader, events chan<- commandEvent) {
+	for {
+		command, err := readRESPFrame(reader)
+		if err != nil {
+			return
+		}
+		events <- commandEvent{command: command, connection: connection, fromReplica: true}
 	}
 }
 
@@ -335,6 +387,7 @@ func runEventLoop(events chan commandEvent) {
 	versions := make(map[string]uint64)
 	waiters := make(map[string][]*blockedRequest)
 	streamWaiters := make(map[string][]*blockedStreamRequest)
+	replicas := make(map[net.Conn]struct{})
 
 	for event := range events {
 		if event.expiration != nil {
@@ -351,6 +404,15 @@ func runEventLoop(events chan commandEvent) {
 		}
 
 		arguments, err := parseRESPCommand(event.command)
+		if event.fromReplica {
+			if err == nil {
+				response := execute(event.command, store)
+				touchModifiedKeys(arguments, response, versions)
+				scheduleExpiration(arguments, response, versions, events)
+				wakeAfterCommand(arguments, store, waiters, streamWaiters)
+			}
+			continue
+		}
 		if err == nil && event.client != nil {
 			if isCommand(arguments[0], "WATCH") {
 				event.response <- watchKeys(arguments, event.client, versions)
@@ -365,7 +427,10 @@ func runEventLoop(events chan commandEvent) {
 				continue
 			}
 			if isCommand(arguments[0], "EXEC") {
-				event.response <- executeTransaction(event.client, store, versions, waiters, streamWaiters, events)
+				event.response <- executeTransaction(event.client, store, versions, waiters, streamWaiters, &transactionContext{
+					events:   events,
+					replicas: replicas,
+				})
 				continue
 			}
 			if isCommand(arguments[0], "DISCARD") {
@@ -392,6 +457,11 @@ func runEventLoop(events chan commandEvent) {
 			touchModifiedKeys(arguments, response, versions)
 			scheduleExpiration(arguments, response, versions, events)
 			wakeAfterCommand(arguments, store, waiters, streamWaiters)
+			if isCommand(arguments[0], "PSYNC") && event.connection != nil {
+				replicas[event.connection] = struct{}{}
+			} else {
+				propagateCommand(event.command, arguments, response, replicas)
+			}
 		}
 		event.response <- response
 	}
@@ -452,10 +522,10 @@ func discardTransaction(client *clientState) []byte {
 	return []byte("+OK\r\n")
 }
 
-func executeTransaction(client *clientState, store map[string]redisValue, versions map[string]uint64, waiters map[string][]*blockedRequest, streamWaiters map[string][]*blockedStreamRequest, eventChannels ...chan<- commandEvent) []byte {
-	var events chan<- commandEvent
-	if len(eventChannels) > 0 {
-		events = eventChannels[0]
+func executeTransaction(client *clientState, store map[string]redisValue, versions map[string]uint64, waiters map[string][]*blockedRequest, streamWaiters map[string][]*blockedStreamRequest, contexts ...*transactionContext) []byte {
+	context := &transactionContext{}
+	if len(contexts) > 0 && contexts[0] != nil {
+		context = contexts[0]
 	}
 	if !client.inMulti {
 		return []byte("-ERR EXEC without MULTI\r\n")
@@ -479,8 +549,9 @@ func executeTransaction(client *clientState, store map[string]redisValue, versio
 		replies = append(replies, response)
 		if err == nil {
 			touchModifiedKeys(arguments, response, versions)
-			scheduleExpiration(arguments, response, versions, events)
+			scheduleExpiration(arguments, response, versions, context.events)
 			wakeAfterCommand(arguments, store, waiters, streamWaiters)
+			propagateCommand(command, arguments, response, context.replicas)
 		}
 	}
 	return rawArrayResponse(replies)
@@ -518,11 +589,51 @@ func touchModifiedKeys(arguments [][]byte, response []byte, versions map[string]
 		isCommand(command, "LPUSH"),
 		isCommand(command, "XADD"):
 		versions[key]++
+	case isCommand(command, "DEL"):
+		for _, argument := range arguments[1:] {
+			versions[string(argument)]++
+		}
 	case isCommand(command, "LPOP"):
 		if !bytes.Equal(response, []byte("$-1\r\n")) &&
 			!bytes.Equal(response, []byte("*-1\r\n")) &&
 			!bytes.Equal(response, []byte("*0\r\n")) {
 			versions[key]++
+		}
+	}
+}
+
+func isWriteCommand(arguments [][]byte) bool {
+	if len(arguments) == 0 {
+		return false
+	}
+	switch {
+	case isCommand(arguments[0], "SET"),
+		isCommand(arguments[0], "DEL"),
+		isCommand(arguments[0], "INCR"),
+		isCommand(arguments[0], "RPUSH"),
+		isCommand(arguments[0], "LPUSH"),
+		isCommand(arguments[0], "LPOP"),
+		isCommand(arguments[0], "XADD"):
+		return true
+	default:
+		return false
+	}
+}
+
+func propagateCommand(command []byte, arguments [][]byte, response []byte, replicas map[net.Conn]struct{}) {
+	if !isWriteCommand(arguments) || len(response) == 0 || response[0] == '-' {
+		return
+	}
+	if isCommand(arguments[0], "LPOP") &&
+		(bytes.Equal(response, []byte("$-1\r\n")) ||
+			bytes.Equal(response, []byte("*-1\r\n")) ||
+			bytes.Equal(response, []byte("*0\r\n"))) {
+		return
+	}
+	for connection := range replicas {
+		if _, err := connection.Write(command); err != nil {
+			delete(replicas, connection)
+			_ = connection.Close()
 		}
 	}
 }
@@ -549,6 +660,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeEcho(arguments)
 	case isCommand(arguments[0], "SET"):
 		return executeSet(arguments, store)
+	case isCommand(arguments[0], "DEL"):
+		return executeDel(arguments, store)
 	case isCommand(arguments[0], "GET"):
 		return executeGet(arguments, store)
 	case isCommand(arguments[0], "INCR"):
@@ -848,6 +961,21 @@ func executeSet(arguments [][]byte, store map[string]redisValue) []byte {
 		string: cloneBytes(arguments[2]),
 	}
 	return []byte("+OK\r\n")
+}
+
+func executeDel(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) < 2 {
+		return []byte("-ERR wrong number of arguments for 'del' command\r\n")
+	}
+	deleted := 0
+	for _, argument := range arguments[1:] {
+		key := string(argument)
+		if _, exists := store[key]; exists {
+			delete(store, key)
+			deleted++
+		}
+	}
+	return integerResponse(deleted)
 }
 
 func setExpiration(arguments [][]byte) (time.Duration, bool, error) {
@@ -1534,6 +1662,45 @@ func parseRESPCommand(command []byte) ([][]byte, error) {
 	return arguments, nil
 }
 
+func readRESPFrame(reader *bufio.Reader) ([]byte, error) {
+	arrayHeader, err := reader.ReadBytes('\n')
+	if err != nil {
+		return nil, err
+	}
+	if len(arrayHeader) < 4 || arrayHeader[0] != '*' || !bytes.HasSuffix(arrayHeader, []byte("\r\n")) {
+		return nil, errors.New("invalid RESP array header")
+	}
+	count, err := strconv.Atoi(string(arrayHeader[1 : len(arrayHeader)-2]))
+	if err != nil || count < 1 {
+		return nil, errors.New("invalid RESP array length")
+	}
+
+	frame := append([]byte(nil), arrayHeader...)
+	for range count {
+		bulkHeader, err := reader.ReadBytes('\n')
+		if err != nil {
+			return nil, err
+		}
+		if len(bulkHeader) < 4 || bulkHeader[0] != '$' || !bytes.HasSuffix(bulkHeader, []byte("\r\n")) {
+			return nil, errors.New("invalid RESP bulk string header")
+		}
+		length, err := strconv.Atoi(string(bulkHeader[1 : len(bulkHeader)-2]))
+		if err != nil || length < 0 {
+			return nil, errors.New("invalid RESP bulk string length")
+		}
+		frame = append(frame, bulkHeader...)
+		contents := make([]byte, length+2)
+		if _, err := io.ReadFull(reader, contents); err != nil {
+			return nil, err
+		}
+		if !bytes.HasSuffix(contents, []byte("\r\n")) {
+			return nil, errors.New("invalid RESP bulk string terminator")
+		}
+		frame = append(frame, contents...)
+	}
+	return frame, nil
+}
+
 func handleConn(conn net.Conn, events chan<- commandEvent) {
 	defer conn.Close()
 
@@ -1553,9 +1720,10 @@ func handleConn(conn net.Conn, events chan<- commandEvent) {
 		}
 
 		events <- commandEvent{
-			command:  buf[:n],
-			response: response,
-			client:   client,
+			command:    buf[:n],
+			response:   response,
+			client:     client,
+			connection: conn,
 		}
 
 		_, err = conn.Write(<-response)

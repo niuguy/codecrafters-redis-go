@@ -117,8 +117,8 @@ func TestInitiateReplicaHandshakeSendsPing(t *testing.T) {
 			[]byte("+PONG\r\n"),
 			[]byte("+OK\r\n"),
 			[]byte("+OK\r\n"),
-			[]byte("+FULLRESYNC replica-id 0\r\n"),
 		}
+		responses = append(responses, append([]byte("+FULLRESYNC replica-id 0\r\n"), rdbBulkString(emptyRDB)...))
 		for i, command := range commands {
 			frame := make([]byte, len(command))
 			if _, err = io.ReadFull(connection, frame); err != nil {
@@ -136,7 +136,8 @@ func TestInitiateReplicaHandshakeSendsPing(t *testing.T) {
 	}()
 
 	port := listener.Addr().(*net.TCPAddr).Port
-	initiateReplicaHandshake(fmt.Sprintf("127.0.0.1 %d", port), 6380)
+	events := make(chan commandEvent)
+	initiateReplicaHandshakeWithEvents(fmt.Sprintf("127.0.0.1 %d", port), 6380, events)
 	if err := <-received; err != nil {
 		t.Fatalf("replica handshake: %v", err)
 	}
@@ -265,6 +266,33 @@ func TestPSyncCommand(t *testing.T) {
 	}
 	if got := execute(testRESPCommand("PSYNC", "?"), store); string(got) != "-ERR wrong number of arguments for 'psync' command\r\n" {
 		t.Fatalf("invalid PSYNC response = %q", got)
+	}
+}
+
+func TestPropagateWriteCommand(t *testing.T) {
+	masterSide, replicaSide := net.Pipe()
+	defer masterSide.Close()
+	defer replicaSide.Close()
+
+	command := testRESPCommand("SET", "foo", "bar")
+	received := make(chan []byte, 1)
+	go func() {
+		frame := make([]byte, len(command))
+		if _, err := io.ReadFull(replicaSide, frame); err == nil {
+			received <- frame
+		}
+	}()
+
+	replicas := map[net.Conn]struct{}{masterSide: {}}
+	propagateCommand(command, testRESPArguments("SET", "foo", "bar"), []byte("+OK\r\n"), replicas)
+
+	select {
+	case frame := <-received:
+		if !bytes.Equal(frame, command) {
+			t.Fatalf("propagated command = %q, want %q", frame, command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for propagated command")
 	}
 }
 
