@@ -238,6 +238,21 @@ func TestInfoCommand(t *testing.T) {
 	}
 }
 
+func TestReplConfCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	for _, command := range [][]string{
+		{"REPLCONF", "listening-port", "6380"},
+		{"REPLCONF", "capa", "psync2"},
+	} {
+		if got := execute(testRESPCommand(command...), store); string(got) != "+OK\r\n" {
+			t.Errorf("REPLCONF %v response = %q", command[1:], got)
+		}
+	}
+	if got := execute(testRESPCommand("REPLCONF"), store); string(got) != "-ERR wrong number of arguments for 'replconf' command\r\n" {
+		t.Fatalf("invalid REPLCONF response = %q", got)
+	}
+}
+
 func TestSetExpirationValidation(t *testing.T) {
 	cases := []struct {
 		name       string

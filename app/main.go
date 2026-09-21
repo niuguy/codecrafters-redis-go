@@ -554,6 +554,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeType(arguments, store)
 	case isCommand(arguments[0], "INFO"):
 		return executeInfo(arguments, store)
+	case isCommand(arguments[0], "REPLCONF"):
+		return executeReplConf(arguments)
 	case isCommand(arguments[0], "XADD"):
 		return executeXAdd(arguments, store)
 	case isCommand(arguments[0], "XRANGE"):
@@ -1103,6 +1105,13 @@ func executeInfo(arguments [][]byte, store map[string]redisValue) []byte {
 	default:
 		return bulkString(nil)
 	}
+}
+
+func executeReplConf(arguments [][]byte) []byte {
+	if len(arguments) < 2 {
+		return []byte("-ERR wrong number of arguments for 'replconf' command\r\n")
+	}
+	return []byte("+OK\r\n")
 }
 
 func simpleString(value string) []byte {
