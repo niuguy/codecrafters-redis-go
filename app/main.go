@@ -21,6 +21,9 @@ const defaultPort = 6379
 
 var masterReplicationID = newReplicationID()
 var serverRole = "master"
+var replicaMasterConn net.Conn
+
+var replicationPing = []byte("*1\r\n$4\r\nPING\r\n")
 
 type serverConfig struct {
 	port      int
@@ -125,6 +128,9 @@ func main() {
 		log.Fatalf("Failed to bind to port %d: %v", config.port, err)
 	}
 	defer listener.Close()
+	if config.replicaOf != "" {
+		go initiateReplicaHandshake(config.replicaOf)
+	}
 
 	events := make(chan commandEvent)
 	go runEventLoop(events)
@@ -198,6 +204,40 @@ func (config serverConfig) role() string {
 		return "slave"
 	}
 	return "master"
+}
+
+func initiateReplicaHandshake(replicaOf string) {
+	address, err := replicaAddress(replicaOf)
+	if err != nil {
+		log.Println("Invalid replica master address:", err)
+		return
+	}
+
+	for {
+		connection, err := net.DialTimeout("tcp", address, time.Second)
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if _, err := connection.Write(replicationPing); err != nil {
+			_ = connection.Close()
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		replicaMasterConn = connection
+		return
+	}
+}
+
+func replicaAddress(replicaOf string) (string, error) {
+	parts := strings.Fields(replicaOf)
+	if len(parts) != 2 || parts[0] == "" {
+		return "", errors.New("replica master must be specified as '<host> <port>'")
+	}
+	if _, err := parsePort([]string{"--port", parts[1]}); err != nil {
+		return "", errors.New("replica master port must be an integer between 1 and 65535")
+	}
+	return net.JoinHostPort(parts[0], parts[1]), nil
 }
 
 func newReplicationID() string {

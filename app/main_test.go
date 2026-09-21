@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"io"
+	"net"
 	"strconv"
 	"testing"
 	"time"
@@ -86,6 +89,40 @@ func TestParseServerConfig(t *testing.T) {
 	}
 	if separateArguments.role() != "slave" {
 		t.Fatalf("separate replica arguments produced role %q", separateArguments.role())
+	}
+}
+
+func TestInitiateReplicaHandshakeSendsPing(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for handshake test: %v", err)
+	}
+	defer listener.Close()
+
+	received := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			received <- err
+			return
+		}
+		defer connection.Close()
+		frame := make([]byte, len(replicationPing))
+		_, err = io.ReadFull(connection, frame)
+		if err == nil && !bytes.Equal(frame, replicationPing) {
+			err = fmt.Errorf("received %q, want %q", frame, replicationPing)
+		}
+		received <- err
+	}()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	initiateReplicaHandshake(fmt.Sprintf("127.0.0.1 %d", port))
+	if err := <-received; err != nil {
+		t.Fatalf("replica handshake: %v", err)
+	}
+	if replicaMasterConn != nil {
+		_ = replicaMasterConn.Close()
+		replicaMasterConn = nil
 	}
 }
 
