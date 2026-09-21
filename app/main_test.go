@@ -253,6 +253,18 @@ func TestReplConfCommand(t *testing.T) {
 	}
 }
 
+func TestPSyncCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	response := execute(testRESPCommand("PSYNC", "?", "-1"), store)
+	want := "+FULLRESYNC " + masterReplicationID + " 0\r\n"
+	if string(response) != want {
+		t.Fatalf("PSYNC response = %q, want %q", response, want)
+	}
+	if got := execute(testRESPCommand("PSYNC", "?"), store); string(got) != "-ERR wrong number of arguments for 'psync' command\r\n" {
+		t.Fatalf("invalid PSYNC response = %q", got)
+	}
+}
+
 func TestSetExpirationValidation(t *testing.T) {
 	cases := []struct {
 		name       string

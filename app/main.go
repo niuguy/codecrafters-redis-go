@@ -556,6 +556,8 @@ func execute(command []byte, store map[string]redisValue) []byte {
 		return executeInfo(arguments, store)
 	case isCommand(arguments[0], "REPLCONF"):
 		return executeReplConf(arguments)
+	case isCommand(arguments[0], "PSYNC"):
+		return executePSync(arguments)
 	case isCommand(arguments[0], "XADD"):
 		return executeXAdd(arguments, store)
 	case isCommand(arguments[0], "XRANGE"):
@@ -1112,6 +1114,13 @@ func executeReplConf(arguments [][]byte) []byte {
 		return []byte("-ERR wrong number of arguments for 'replconf' command\r\n")
 	}
 	return []byte("+OK\r\n")
+}
+
+func executePSync(arguments [][]byte) []byte {
+	if len(arguments) != 3 {
+		return []byte("-ERR wrong number of arguments for 'psync' command\r\n")
+	}
+	return simpleString("FULLRESYNC " + masterReplicationID + " 0")
 }
 
 func simpleString(value string) []byte {
