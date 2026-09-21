@@ -256,9 +256,12 @@ func TestReplConfCommand(t *testing.T) {
 func TestPSyncCommand(t *testing.T) {
 	store := make(map[string]redisValue)
 	response := execute(testRESPCommand("PSYNC", "?", "-1"), store)
-	want := "+FULLRESYNC " + masterReplicationID + " 0\r\n"
-	if string(response) != want {
+	want := append([]byte("+FULLRESYNC "+masterReplicationID+" 0\r\n"), rdbBulkString(emptyRDB)...)
+	if !bytes.Equal(response, want) {
 		t.Fatalf("PSYNC response = %q, want %q", response, want)
+	}
+	if !bytes.Contains(response, []byte("$"+strconv.Itoa(len(emptyRDB))+"\r\n")) {
+		t.Fatalf("PSYNC response does not contain RDB length: %q", response)
 	}
 	if got := execute(testRESPCommand("PSYNC", "?"), store); string(got) != "-ERR wrong number of arguments for 'psync' command\r\n" {
 		t.Fatalf("invalid PSYNC response = %q", got)

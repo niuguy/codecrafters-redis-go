@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	cryptorand "crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -25,6 +26,10 @@ var serverRole = "master"
 var replicaMasterConn net.Conn
 
 var replicationPing = []byte("*1\r\n$4\r\nPING\r\n")
+
+const emptyRDBBase64 = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog=="
+
+var emptyRDB = mustDecodeBase64(emptyRDBBase64)
 
 type serverConfig struct {
 	port      int
@@ -314,6 +319,14 @@ func newReplicationID() string {
 		return hex.EncodeToString(make([]byte, 20))
 	}
 	return hex.EncodeToString(identifier)
+}
+
+func mustDecodeBase64(value string) []byte {
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		panic(err)
+	}
+	return decoded
 }
 
 // runEventLoop serializes command execution and owns the shared Redis state.
@@ -1120,7 +1133,16 @@ func executePSync(arguments [][]byte) []byte {
 	if len(arguments) != 3 {
 		return []byte("-ERR wrong number of arguments for 'psync' command\r\n")
 	}
-	return simpleString("FULLRESYNC " + masterReplicationID + " 0")
+	response := simpleString("FULLRESYNC " + masterReplicationID + " 0")
+	return append(response, rdbBulkString(emptyRDB)...)
+}
+
+func rdbBulkString(value []byte) []byte {
+	response := make([]byte, 0, len(value)+24)
+	response = append(response, '$')
+	response = strconv.AppendInt(response, int64(len(value)), 10)
+	response = append(response, '\r', '\n')
+	return append(response, value...)
 }
 
 func simpleString(value string) []byte {
