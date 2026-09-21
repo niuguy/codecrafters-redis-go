@@ -413,15 +413,14 @@ func runEventLoop(events chan commandEvent) {
 				if event.connection != nil {
 					_, _ = event.connection.Write(replConfAckResponse(replicaOffsets[event.connection]))
 				}
+				advanceReplicaOffset(replicaOffsets, event.connection, event.command)
 				continue
 			}
 			response := execute(event.command, store)
 			touchModifiedKeys(arguments, response, versions)
 			scheduleExpiration(arguments, response, versions, events)
 			wakeAfterCommand(arguments, store, waiters, streamWaiters)
-			if event.connection != nil {
-				replicaOffsets[event.connection] += int64(len(event.command))
-			}
+			advanceReplicaOffset(replicaOffsets, event.connection, event.command)
 			continue
 		}
 		if err == nil && event.client != nil {
@@ -658,6 +657,12 @@ func isReplConfGetAck(arguments [][]byte) bool {
 
 func replConfAckResponse(offset int64) []byte {
 	return encodeRESPCommand("REPLCONF", "ACK", strconv.FormatInt(offset, 10))
+}
+
+func advanceReplicaOffset(offsets map[net.Conn]int64, connection net.Conn, command []byte) {
+	if connection != nil {
+		offsets[connection] += int64(len(command))
+	}
 }
 
 func isCommand(value []byte, name string) bool {

@@ -310,6 +310,28 @@ func TestReplConfGetAck(t *testing.T) {
 	}
 }
 
+func TestAdvanceReplicaOffset(t *testing.T) {
+	masterSide, replicaSide := net.Pipe()
+	defer masterSide.Close()
+	defer replicaSide.Close()
+
+	offsets := make(map[net.Conn]int64)
+	firstGetAck := testRESPCommand("REPLCONF", "GETACK", "*")
+	ping := testRESPCommand("PING")
+	secondGetAck := testRESPCommand("REPLCONF", "GETACK", "*")
+
+	advanceReplicaOffset(offsets, masterSide, firstGetAck)
+	if got := offsets[masterSide]; got != int64(len(firstGetAck)) {
+		t.Fatalf("offset after first GETACK = %d, want %d", got, len(firstGetAck))
+	}
+	advanceReplicaOffset(offsets, masterSide, ping)
+	advanceReplicaOffset(offsets, masterSide, secondGetAck)
+	want := len(firstGetAck) + len(ping) + len(secondGetAck)
+	if got := offsets[masterSide]; got != int64(want) {
+		t.Fatalf("offset after three commands = %d, want %d", got, want)
+	}
+}
+
 func TestSetExpirationValidation(t *testing.T) {
 	cases := []struct {
 		name       string
