@@ -1614,6 +1614,20 @@ func executeBitCount(arguments [][]byte, store map[string]redisValue) []byte {
 }
 
 func executeGeoAdd(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 5 {
+		return []byte("-ERR wrong number of arguments for 'geoadd' command\r\n")
+	}
+
+	longitude, longitudeErr := strconv.ParseFloat(string(arguments[2]), 64)
+	latitude, latitudeErr := strconv.ParseFloat(string(arguments[3]), 64)
+	if longitudeErr != nil || latitudeErr != nil {
+		return []byte("-ERR invalid longitude,latitude pair\r\n")
+	}
+	if math.IsNaN(longitude) || math.IsNaN(latitude) ||
+		longitude < -180 || longitude > 180 ||
+		latitude < -85.05112878 || latitude > 85.05112878 {
+		return []byte(fmt.Sprintf("-ERR invalid longitude,latitude pair %.6f,%.6f\r\n", longitude, latitude))
+	}
 	return integerResponse(1)
 }
 

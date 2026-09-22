@@ -769,6 +769,23 @@ func TestGeoAddCommand(t *testing.T) {
 	if got := execute(testRESPCommand("GEOADD", "places", "-0.0884948", "51.506479", "London"), store); string(got) != ":1\r\n" {
 		t.Fatalf("GEOADD response = %q", got)
 	}
+	for _, command := range [][]string{
+		{"GEOADD", "places", "-180", "-85.05112878", "southwest"},
+		{"GEOADD", "places", "180", "85.05112878", "northeast"},
+	} {
+		if got := execute(testRESPCommand(command...), store); string(got) != ":1\r\n" {
+			t.Errorf("valid GEOADD %v response = %q", command, got)
+		}
+	}
+	for _, command := range [][]string{
+		{"GEOADD", "places", "180", "90", "invalid-latitude"},
+		{"GEOADD", "places", "181", "0.3", "invalid-longitude"},
+		{"GEOADD", "places", "not-a-number", "0", "invalid-number"},
+	} {
+		if got := execute(testRESPCommand(command...), store); got[0] != '-' {
+			t.Errorf("invalid GEOADD %v response = %q", command, got)
+		}
+	}
 	if len(store) != 0 {
 		t.Fatalf("GEOADD unexpectedly stored location data: %#v", store)
 	}
