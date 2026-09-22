@@ -657,6 +657,32 @@ func TestGetBitCommand(t *testing.T) {
 	}
 }
 
+func TestStrLenCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	if got := execute(testRESPCommand("STRLEN", "missing"), store); string(got) != ":0\r\n" {
+		t.Fatalf("STRLEN missing key response = %q", got)
+	}
+	if got := execute(testRESPCommand("SETBIT", "bitmap", "10", "1"), store); string(got) != ":0\r\n" {
+		t.Fatalf("SETBIT response = %q", got)
+	}
+	if got := execute(testRESPCommand("STRLEN", "bitmap"), store); string(got) != ":2\r\n" {
+		t.Fatalf("STRLEN grown bitmap response = %q", got)
+	}
+	if got := execute(testRESPCommand("SET", "string", "hello"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("STRLEN", "string"), store); string(got) != ":5\r\n" {
+		t.Fatalf("STRLEN string response = %q", got)
+	}
+	execute(testRESPCommand("ZADD", "zset", "1", "member"), store)
+	if got := execute(testRESPCommand("STRLEN", "zset"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("STRLEN wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("STRLEN"), store); got[0] != '-' {
+		t.Fatalf("STRLEN invalid arity response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()

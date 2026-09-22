@@ -1008,6 +1008,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeSetBit(arguments, store)
 	case isCommand(arguments[0], "GETBIT"):
 		return executeGetBit(arguments, store)
+	case isCommand(arguments[0], "STRLEN"):
+		return executeStrLen(arguments, store)
 	case isCommand(arguments[0], "ZADD"):
 		return executeZAdd(arguments, store)
 	case isCommand(arguments[0], "ZREM"):
@@ -1493,6 +1495,21 @@ func executeGetBit(arguments [][]byte, store map[string]redisValue) []byte {
 		return integerResponse(1)
 	}
 	return integerResponse(0)
+}
+
+func executeStrLen(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 2 {
+		return []byte("-ERR wrong number of arguments for 'strlen' command\r\n")
+	}
+
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return integerResponse(0)
+	}
+	if value.kind != stringKind {
+		return wrongTypeError()
+	}
+	return integerResponse(len(value.string))
 }
 
 func parseBitPosition(raw []byte) (int, byte, bool) {
