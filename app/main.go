@@ -1026,6 +1026,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeGeoAdd(arguments, store)
 	case isCommand(arguments[0], "GEOPOS"):
 		return executeGeoPos(arguments, store)
+	case isCommand(arguments[0], "GEODIST"):
+		return executeGeoDist(arguments, store)
 	case isCommand(arguments[0], "ZADD"):
 		return executeZAdd(arguments, store)
 	case isCommand(arguments[0], "ZREM"):
@@ -1752,6 +1754,68 @@ func geoHashPosition(score float64) (float64, float64) {
 		}
 	}
 	return (longitudeMin + longitudeMax) / 2, (latitudeMin + latitudeMax) / 2
+}
+
+func executeGeoDist(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 4 && len(arguments) != 5 {
+		return []byte("-ERR wrong number of arguments for 'geodist' command\r\n")
+	}
+
+	unit := "m"
+	if len(arguments) == 5 {
+		unit = strings.ToLower(string(arguments[4]))
+		if unit != "m" && unit != "km" && unit != "mi" && unit != "ft" {
+			return []byte("-ERR unsupported unit provided\r\n")
+		}
+	}
+
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return []byte("$-1\r\n")
+	}
+	if value.kind != zsetKind {
+		return wrongTypeError()
+	}
+	score1, exists := value.zset[string(arguments[2])]
+	if !exists {
+		return []byte("$-1\r\n")
+	}
+	score2, exists := value.zset[string(arguments[3])]
+	if !exists {
+		return []byte("$-1\r\n")
+	}
+
+	distance := 0.0
+	if score1 != score2 {
+		longitude1, latitude1 := geoHashPosition(score1)
+		longitude2, latitude2 := geoHashPosition(score2)
+		distance = geoDistanceMeters(longitude1, latitude1, longitude2, latitude2)
+	}
+	switch unit {
+	case "km":
+		distance /= 1000
+	case "mi":
+		distance /= 1609.344
+	case "ft":
+		distance *= 3.280839895013123
+	}
+	return bulkString([]byte(strconv.FormatFloat(distance, 'f', -1, 64)))
+}
+
+func geoDistanceMeters(longitude1, latitude1, longitude2, latitude2 float64) float64 {
+	const earthRadiusMeters = 6372797.560856
+	const degreesToRadians = math.Pi / 180
+
+	latitude1 *= degreesToRadians
+	latitude2 *= degreesToRadians
+	deltaLatitude := (latitude2 - latitude1) / 2
+	deltaLongitude := (longitude2 - longitude1) * degreesToRadians / 2
+	a := math.Sin(deltaLatitude)*math.Sin(deltaLatitude) +
+		math.Cos(latitude1)*math.Cos(latitude2)*math.Sin(deltaLongitude)*math.Sin(deltaLongitude)
+	if a > 1 {
+		a = 1
+	}
+	return earthRadiusMeters * 2 * math.Asin(math.Sqrt(a))
 }
 
 func parseBitPosition(raw []byte) (int, byte, bool) {

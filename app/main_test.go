@@ -822,6 +822,36 @@ func TestGeoPosCommand(t *testing.T) {
 	}
 }
 
+func TestGeoDistCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	execute(testRESPCommand("GEOADD", "places", "13.361389", "38.115556", "Palermo", "15.087269", "37.502669", "Catania"), store)
+
+	if got := execute(testRESPCommand("GEODIST", "places", "Palermo", "Catania"), store); string(got) != "$18\r\n166274.15156959998\r\n" {
+		t.Fatalf("GEODIST meters response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEODIST", "places", "Palermo", "Catania", "km"), store); string(got) != "$18\r\n166.27415156959998\r\n" {
+		t.Fatalf("GEODIST kilometers response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEODIST", "places", "Palermo", "Palermo", "mi"), store); string(got) != "$1\r\n0\r\n" {
+		t.Fatalf("GEODIST same member response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEODIST", "places", "Palermo", "missing"), store); string(got) != "$-1\r\n" {
+		t.Fatalf("GEODIST missing member response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEODIST", "places", "Palermo", "Catania", "yards"), store); got[0] != '-' {
+		t.Fatalf("GEODIST invalid unit response = %q", got)
+	}
+	if got := execute(testRESPCommand("SET", "string", "value"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEODIST", "string", "Palermo", "Catania"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("GEODIST wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEODIST", "places", "Palermo"), store); got[0] != '-' {
+		t.Fatalf("GEODIST invalid arity response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()
