@@ -761,6 +761,7 @@ func touchModifiedKeys(arguments [][]byte, response []byte, versions map[string]
 	switch {
 	case isCommand(command, "SET"),
 		isCommand(command, "INCR"),
+		isCommand(command, "SETBIT"),
 		isCommand(command, "RPUSH"),
 		isCommand(command, "LPUSH"),
 		isCommand(command, "ZADD"),
@@ -805,6 +806,7 @@ func isWriteCommand(arguments [][]byte) bool {
 	case isCommand(arguments[0], "SET"),
 		isCommand(arguments[0], "DEL"),
 		isCommand(arguments[0], "INCR"),
+		isCommand(arguments[0], "SETBIT"),
 		isCommand(arguments[0], "RPUSH"),
 		isCommand(arguments[0], "LPUSH"),
 		isCommand(arguments[0], "LPOP"),
@@ -1002,6 +1004,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeGet(arguments, store)
 	case isCommand(arguments[0], "INCR"):
 		return executeIncr(arguments, store)
+	case isCommand(arguments[0], "SETBIT"):
+		return executeSetBit(arguments, store)
 	case isCommand(arguments[0], "ZADD"):
 		return executeZAdd(arguments, store)
 	case isCommand(arguments[0], "ZREM"):
@@ -1420,6 +1424,55 @@ func executeIncr(arguments [][]byte, store map[string]redisValue) []byte {
 		string: []byte(strconv.FormatInt(next, 10)),
 	}
 	return integer64Response(next)
+}
+
+func executeSetBit(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 4 {
+		return []byte("-ERR wrong number of arguments for 'setbit' command\r\n")
+	}
+
+	offset, err := strconv.ParseInt(string(arguments[2]), 10, 64)
+	if err != nil || offset < 0 {
+		return []byte("-ERR bit offset is not an integer or out of range\r\n")
+	}
+	bit, err := strconv.Atoi(string(arguments[3]))
+	if err != nil || (bit != 0 && bit != 1) {
+		return []byte("-ERR bit is not an integer or out of range\r\n")
+	}
+
+	byteIndex64 := offset / 8
+	maxInt := int(^uint(0) >> 1)
+	if byteIndex64 >= int64(maxInt) {
+		return []byte("-ERR bit offset is not an integer or out of range\r\n")
+	}
+	byteIndex := int(byteIndex64)
+	mask := byte(1 << (7 - uint(offset%8)))
+
+	key := string(arguments[1])
+	value, ok := store[key]
+	if ok && value.kind != stringKind {
+		return wrongTypeError()
+	}
+	if !ok {
+		value.kind = stringKind
+	}
+
+	oldBit := 0
+	if byteIndex < len(value.string) && value.string[byteIndex]&mask != 0 {
+		oldBit = 1
+	}
+	if byteIndex >= len(value.string) {
+		extended := make([]byte, byteIndex+1)
+		copy(extended, value.string)
+		value.string = extended
+	}
+	if bit == 1 {
+		value.string[byteIndex] |= mask
+	} else {
+		value.string[byteIndex] &^= mask
+	}
+	store[key] = value
+	return integerResponse(oldBit)
 }
 
 func executeZAdd(arguments [][]byte, store map[string]redisValue) []byte {

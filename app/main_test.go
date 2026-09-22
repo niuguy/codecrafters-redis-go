@@ -574,6 +574,50 @@ func TestZScoreCommand(t *testing.T) {
 	}
 }
 
+func TestSetBitCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+
+	if got := execute(testRESPCommand("SETBIT", "bitmap", "3", "1"), store); string(got) != ":0\r\n" {
+		t.Fatalf("SETBIT new bit response = %q", got)
+	}
+	if got := execute(testRESPCommand("GET", "bitmap"), store); string(got) != string(bulkString([]byte{0x10})) {
+		t.Fatalf("GET after SETBIT response = %q", got)
+	}
+	if got := execute(testRESPCommand("SETBIT", "bitmap", "3", "0"), store); string(got) != ":1\r\n" {
+		t.Fatalf("SETBIT clearing bit response = %q", got)
+	}
+	if got := execute(testRESPCommand("SETBIT", "bitmap", "8", "1"), store); string(got) != ":0\r\n" {
+		t.Fatalf("SETBIT extended bit response = %q", got)
+	}
+	if got := execute(testRESPCommand("GET", "bitmap"), store); string(got) != string(bulkString([]byte{0x00, 0x80})) {
+		t.Fatalf("GET after extending SETBIT response = %q", got)
+	}
+
+	if got := execute(testRESPCommand("SET", "string", "A"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("SETBIT", "string", "1", "0"), store); string(got) != ":1\r\n" {
+		t.Fatalf("SETBIT existing string response = %q", got)
+	}
+	if got := execute(testRESPCommand("SETBIT", "string", "1", "0"), store); string(got) != ":0\r\n" {
+		t.Fatalf("SETBIT unchanged bit response = %q", got)
+	}
+	if got := execute(testRESPCommand("SETBIT", "bitmap", "0", "2"), store); string(got) != "-ERR bit is not an integer or out of range\r\n" {
+		t.Fatalf("SETBIT invalid bit response = %q", got)
+	}
+	if got := execute(testRESPCommand("SETBIT", "bitmap", "-1", "1"), store); string(got) != "-ERR bit offset is not an integer or out of range\r\n" {
+		t.Fatalf("SETBIT invalid offset response = %q", got)
+	}
+	if got := execute(testRESPCommand("SETBIT", "bitmap", "0"), store); got[0] != '-' {
+		t.Fatalf("SETBIT invalid arity response = %q", got)
+	}
+
+	execute(testRESPCommand("ZADD", "zset", "1", "member"), store)
+	if got := execute(testRESPCommand("SETBIT", "zset", "0", "1"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("SETBIT wrong type response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()
