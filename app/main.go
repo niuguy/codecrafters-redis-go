@@ -1000,6 +1000,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeZAdd(arguments, store)
 	case isCommand(arguments[0], "ZRANK"):
 		return executeZRank(arguments, store)
+	case isCommand(arguments[0], "ZCARD"):
+		return executeZCard(arguments, store)
 	case isCommand(arguments[0], "ZRANGE"):
 		return executeZRange(arguments, store)
 	case isCommand(arguments[0], "RPUSH"):
@@ -1495,6 +1497,21 @@ func executeZRank(arguments [][]byte, store map[string]redisValue) []byte {
 		}
 	}
 	return []byte("$-1\r\n")
+}
+
+func executeZCard(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 2 {
+		return []byte("-ERR wrong number of arguments for 'zcard' command\r\n")
+	}
+
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return integerResponse(0)
+	}
+	if value.kind != zsetKind {
+		return wrongTypeError()
+	}
+	return integerResponse(len(value.zset))
 }
 
 func executeZRange(arguments [][]byte, store map[string]redisValue) []byte {

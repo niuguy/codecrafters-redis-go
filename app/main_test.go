@@ -493,6 +493,32 @@ func TestZRangeCommand(t *testing.T) {
 	}
 }
 
+func TestZCardCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	if got := execute(testRESPCommand("ZCARD", "missing-key"), store); string(got) != ":0\r\n" {
+		t.Fatalf("ZCARD missing key response = %q", got)
+	}
+
+	execute(testRESPCommand("ZADD", "scores", "8.0", "Sam", "7.0", "Alex"), store)
+	if got := execute(testRESPCommand("ZCARD", "scores"), store); string(got) != ":2\r\n" {
+		t.Fatalf("ZCARD response = %q", got)
+	}
+	execute(testRESPCommand("ZADD", "scores", "9.0", "Sam"), store)
+	if got := execute(testRESPCommand("ZCARD", "scores"), store); string(got) != ":2\r\n" {
+		t.Fatalf("ZCARD after score update response = %q", got)
+	}
+
+	if got := execute(testRESPCommand("SET", "string", "value"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZCARD", "string"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("ZCARD wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZCARD"), store); got[0] != '-' {
+		t.Fatalf("ZCARD invalid arity response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()
