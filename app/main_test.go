@@ -618,6 +618,45 @@ func TestSetBitCommand(t *testing.T) {
 	}
 }
 
+func TestGetBitCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+
+	if got := execute(testRESPCommand("GETBIT", "missing", "100"), store); string(got) != ":0\r\n" {
+		t.Fatalf("GETBIT missing key response = %q", got)
+	}
+	execute(testRESPCommand("SETBIT", "bitmap", "3", "1"), store)
+	for _, testCase := range []struct {
+		offset string
+		want   string
+	}{
+		{offset: "3", want: ":1\r\n"},
+		{offset: "2", want: ":0\r\n"},
+		{offset: "8", want: ":0\r\n"},
+	} {
+		if got := execute(testRESPCommand("GETBIT", "bitmap", testCase.offset), store); string(got) != testCase.want {
+			t.Errorf("GETBIT offset %s response = %q, want %q", testCase.offset, got, testCase.want)
+		}
+	}
+
+	if got := execute(testRESPCommand("SET", "string", "A"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("GETBIT", "string", "1"), store); string(got) != ":1\r\n" {
+		t.Fatalf("GETBIT existing string response = %q", got)
+	}
+	if got := execute(testRESPCommand("GETBIT", "string", "-1"), store); string(got) != "-ERR bit offset is not an integer or out of range\r\n" {
+		t.Fatalf("GETBIT invalid offset response = %q", got)
+	}
+	if got := execute(testRESPCommand("GETBIT", "bitmap"), store); got[0] != '-' {
+		t.Fatalf("GETBIT invalid arity response = %q", got)
+	}
+
+	execute(testRESPCommand("ZADD", "zset", "1", "member"), store)
+	if got := execute(testRESPCommand("GETBIT", "zset", "0"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("GETBIT wrong type response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()

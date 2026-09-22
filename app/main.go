@@ -1006,6 +1006,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeIncr(arguments, store)
 	case isCommand(arguments[0], "SETBIT"):
 		return executeSetBit(arguments, store)
+	case isCommand(arguments[0], "GETBIT"):
+		return executeGetBit(arguments, store)
 	case isCommand(arguments[0], "ZADD"):
 		return executeZAdd(arguments, store)
 	case isCommand(arguments[0], "ZREM"):
@@ -1431,22 +1433,14 @@ func executeSetBit(arguments [][]byte, store map[string]redisValue) []byte {
 		return []byte("-ERR wrong number of arguments for 'setbit' command\r\n")
 	}
 
-	offset, err := strconv.ParseInt(string(arguments[2]), 10, 64)
-	if err != nil || offset < 0 {
+	byteIndex, mask, ok := parseBitPosition(arguments[2])
+	if !ok {
 		return []byte("-ERR bit offset is not an integer or out of range\r\n")
 	}
 	bit, err := strconv.Atoi(string(arguments[3]))
 	if err != nil || (bit != 0 && bit != 1) {
 		return []byte("-ERR bit is not an integer or out of range\r\n")
 	}
-
-	byteIndex64 := offset / 8
-	maxInt := int(^uint(0) >> 1)
-	if byteIndex64 >= int64(maxInt) {
-		return []byte("-ERR bit offset is not an integer or out of range\r\n")
-	}
-	byteIndex := int(byteIndex64)
-	mask := byte(1 << (7 - uint(offset%8)))
 
 	key := string(arguments[1])
 	value, ok := store[key]
@@ -1473,6 +1467,46 @@ func executeSetBit(arguments [][]byte, store map[string]redisValue) []byte {
 	}
 	store[key] = value
 	return integerResponse(oldBit)
+}
+
+func executeGetBit(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 3 {
+		return []byte("-ERR wrong number of arguments for 'getbit' command\r\n")
+	}
+
+	byteIndex, mask, ok := parseBitPosition(arguments[2])
+	if !ok {
+		return []byte("-ERR bit offset is not an integer or out of range\r\n")
+	}
+
+	value, exists := store[string(arguments[1])]
+	if !exists {
+		return integerResponse(0)
+	}
+	if value.kind != stringKind {
+		return wrongTypeError()
+	}
+	if byteIndex >= len(value.string) {
+		return integerResponse(0)
+	}
+	if value.string[byteIndex]&mask != 0 {
+		return integerResponse(1)
+	}
+	return integerResponse(0)
+}
+
+func parseBitPosition(raw []byte) (int, byte, bool) {
+	offset, err := strconv.ParseInt(string(raw), 10, 64)
+	if err != nil || offset < 0 {
+		return 0, 0, false
+	}
+
+	byteIndex64 := offset / 8
+	maxInt := int(^uint(0) >> 1)
+	if byteIndex64 >= int64(maxInt) {
+		return 0, 0, false
+	}
+	return int(byteIndex64), byte(1 << (7 - uint(offset%8))), true
 }
 
 func executeZAdd(arguments [][]byte, store map[string]redisValue) []byte {
