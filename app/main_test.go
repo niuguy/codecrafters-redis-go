@@ -720,6 +720,44 @@ func TestBitCountCommand(t *testing.T) {
 	}
 }
 
+func TestBitOpAndCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	if got := execute(testRESPCommand("SET", "first", string([]byte{0xf0, 0x0f})), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET first response = %q", got)
+	}
+	if got := execute(testRESPCommand("SET", "second", string([]byte{0xcc, 0x33, 0xff})), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET second response = %q", got)
+	}
+	if got := execute(testRESPCommand("BITOP", "AND", "result", "first", "second"), store); string(got) != ":3\r\n" {
+		t.Fatalf("BITOP AND response = %q", got)
+	}
+	if got := execute(testRESPCommand("GET", "result"), store); string(got) != string(bulkString([]byte{0xc0, 0x03, 0x00})) {
+		t.Fatalf("BITOP AND result = %q", got)
+	}
+
+	if got := execute(testRESPCommand("BITOP", "AND", "missing-source-result", "missing"), store); string(got) != ":0\r\n" {
+		t.Fatalf("BITOP missing source response = %q", got)
+	}
+	if got := execute(testRESPCommand("STRLEN", "missing-source-result"), store); string(got) != ":0\r\n" {
+		t.Fatalf("BITOP missing source length = %q", got)
+	}
+	if got := execute(testRESPCommand("BITOP", "OR", "result", "first"), store); string(got) != "-ERR syntax error\r\n" {
+		t.Fatalf("BITOP unsupported operation response = %q", got)
+	}
+	if got := execute(testRESPCommand("BITOP", "AND", "result", "first", "missing"), store); string(got) != ":2\r\n" {
+		t.Fatalf("BITOP missing trailing source response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZADD", "zset", "1", "member"), store); string(got) != ":1\r\n" {
+		t.Fatalf("ZADD response = %q", got)
+	}
+	if got := execute(testRESPCommand("BITOP", "AND", "result", "zset", "first"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("BITOP wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("BITOP", "AND", "result"), store); got[0] != '-' {
+		t.Fatalf("BITOP invalid arity response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()

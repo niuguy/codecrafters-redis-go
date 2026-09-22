@@ -760,6 +760,10 @@ func touchModifiedKeys(arguments [][]byte, response []byte, versions map[string]
 	command := arguments[0]
 	key := string(arguments[1])
 	switch {
+	case isCommand(command, "BITOP"):
+		if len(arguments) > 2 {
+			versions[string(arguments[2])]++
+		}
 	case isCommand(command, "SET"),
 		isCommand(command, "INCR"),
 		isCommand(command, "SETBIT"),
@@ -808,6 +812,7 @@ func isWriteCommand(arguments [][]byte) bool {
 		isCommand(arguments[0], "DEL"),
 		isCommand(arguments[0], "INCR"),
 		isCommand(arguments[0], "SETBIT"),
+		isCommand(arguments[0], "BITOP"),
 		isCommand(arguments[0], "RPUSH"),
 		isCommand(arguments[0], "LPUSH"),
 		isCommand(arguments[0], "LPOP"),
@@ -1009,6 +1014,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeSetBit(arguments, store)
 	case isCommand(arguments[0], "GETBIT"):
 		return executeGetBit(arguments, store)
+	case isCommand(arguments[0], "BITOP"):
+		return executeBitOp(arguments, store)
 	case isCommand(arguments[0], "STRLEN"):
 		return executeStrLen(arguments, store)
 	case isCommand(arguments[0], "BITCOUNT"):
@@ -1498,6 +1505,43 @@ func executeGetBit(arguments [][]byte, store map[string]redisValue) []byte {
 		return integerResponse(1)
 	}
 	return integerResponse(0)
+}
+
+func executeBitOp(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) < 4 || !isCommand(arguments[1], "AND") {
+		return []byte("-ERR syntax error\r\n")
+	}
+
+	sources := make([][]byte, len(arguments)-3)
+	maxLength := 0
+	for i, argument := range arguments[3:] {
+		value, ok := store[string(argument)]
+		if !ok {
+			continue
+		}
+		if value.kind != stringKind {
+			return wrongTypeError()
+		}
+		sources[i] = value.string
+		if len(value.string) > maxLength {
+			maxLength = len(value.string)
+		}
+	}
+
+	result := make([]byte, maxLength)
+	for index := range result {
+		result[index] = 0xff
+		for _, source := range sources {
+			if index >= len(source) {
+				result[index] = 0
+				break
+			}
+			result[index] &= source[index]
+		}
+	}
+
+	store[string(arguments[2])] = redisValue{kind: stringKind, string: result}
+	return integerResponse(maxLength)
 }
 
 func executeStrLen(arguments [][]byte, store map[string]redisValue) []byte {
