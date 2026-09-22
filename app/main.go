@@ -1000,6 +1000,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeZAdd(arguments, store)
 	case isCommand(arguments[0], "ZRANK"):
 		return executeZRank(arguments, store)
+	case isCommand(arguments[0], "ZRANGE"):
+		return executeZRange(arguments, store)
 	case isCommand(arguments[0], "RPUSH"):
 		return executeRPush(arguments, store)
 	case isCommand(arguments[0], "LRANGE"):
@@ -1455,6 +1457,23 @@ type sortedSetMember struct {
 	score  float64
 }
 
+func sortedSetMembers(zset map[string]float64) []sortedSetMember {
+	members := make([]sortedSetMember, 0, len(zset))
+	for member, score := range zset {
+		members = append(members, sortedSetMember{member: member, score: score})
+	}
+	slices.SortFunc(members, func(left, right sortedSetMember) int {
+		if left.score < right.score {
+			return -1
+		}
+		if left.score > right.score {
+			return 1
+		}
+		return strings.Compare(left.member, right.member)
+	})
+	return members
+}
+
 func executeZRank(arguments [][]byte, store map[string]redisValue) []byte {
 	if len(arguments) != 3 {
 		return []byte("-ERR wrong number of arguments for 'zrank' command\r\n")
@@ -1468,19 +1487,7 @@ func executeZRank(arguments [][]byte, store map[string]redisValue) []byte {
 		return wrongTypeError()
 	}
 
-	members := make([]sortedSetMember, 0, len(value.zset))
-	for member, score := range value.zset {
-		members = append(members, sortedSetMember{member: member, score: score})
-	}
-	slices.SortFunc(members, func(left, right sortedSetMember) int {
-		if left.score < right.score {
-			return -1
-		}
-		if left.score > right.score {
-			return 1
-		}
-		return strings.Compare(left.member, right.member)
-	})
+	members := sortedSetMembers(value.zset)
 
 	for rank, member := range members {
 		if member.member == string(arguments[2]) {
@@ -1488,6 +1495,41 @@ func executeZRank(arguments [][]byte, store map[string]redisValue) []byte {
 		}
 	}
 	return []byte("$-1\r\n")
+}
+
+func executeZRange(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 4 {
+		return []byte("-ERR wrong number of arguments for 'zrange' command\r\n")
+	}
+
+	start, err := strconv.Atoi(string(arguments[2]))
+	if err != nil {
+		return []byte("-ERR value is not an integer or out of range\r\n")
+	}
+	stop, err := strconv.Atoi(string(arguments[3]))
+	if err != nil {
+		return []byte("-ERR value is not an integer or out of range\r\n")
+	}
+
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return arrayResponse(nil)
+	}
+	if value.kind != zsetKind {
+		return wrongTypeError()
+	}
+
+	members := sortedSetMembers(value.zset)
+	start, stop, ok = listRange(start, stop, len(members))
+	if !ok {
+		return arrayResponse(nil)
+	}
+
+	result := make([][]byte, 0, stop-start+1)
+	for _, member := range members[start : stop+1] {
+		result = append(result, []byte(member.member))
+	}
+	return arrayResponse(result)
 }
 
 func executeRPush(arguments [][]byte, store map[string]redisValue) []byte {

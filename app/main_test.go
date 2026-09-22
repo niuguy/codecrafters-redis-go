@@ -463,6 +463,36 @@ func TestZRankCommand(t *testing.T) {
 	}
 }
 
+func TestZRangeCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	execute(testRESPCommand("ZADD", "scores", "8.0", "Sam", "7.0", "Alex", "7.0", "Bob", "10.0", "Zoe"), store)
+
+	if got := execute(testRESPCommand("ZRANGE", "scores", "0", "-1"), store); string(got) != "*4\r\n$4\r\nAlex\r\n$3\r\nBob\r\n$3\r\nSam\r\n$3\r\nZoe\r\n" {
+		t.Fatalf("ZRANGE all response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZRANGE", "scores", "1", "2"), store); string(got) != "*2\r\n$3\r\nBob\r\n$3\r\nSam\r\n" {
+		t.Fatalf("ZRANGE subset response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZRANGE", "scores", "-2", "-1"), store); string(got) != "*2\r\n$3\r\nSam\r\n$3\r\nZoe\r\n" {
+		t.Fatalf("ZRANGE negative range response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZRANGE", "missing-key", "0", "-1"), store); string(got) != "*0\r\n" {
+		t.Fatalf("ZRANGE missing key response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZRANGE", "scores", "10", "20"), store); string(got) != "*0\r\n" {
+		t.Fatalf("ZRANGE out-of-range response = %q", got)
+	}
+	if got := execute(testRESPCommand("SET", "string", "value"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZRANGE", "string", "0", "-1"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("ZRANGE wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZRANGE", "scores", "bad", "-1"), store); string(got) != "-ERR value is not an integer or out of range\r\n" {
+		t.Fatalf("ZRANGE invalid start response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()
