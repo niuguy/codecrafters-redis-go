@@ -519,6 +519,30 @@ func TestZCardCommand(t *testing.T) {
 	}
 }
 
+func TestZScoreCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	execute(testRESPCommand("ZADD", "scores", "8.5", "Sam"), store)
+
+	if got := execute(testRESPCommand("ZSCORE", "scores", "Sam"), store); string(got) != "$3\r\n8.5\r\n" {
+		t.Fatalf("ZSCORE response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZSCORE", "scores", "missing"), store); string(got) != "$-1\r\n" {
+		t.Fatalf("ZSCORE missing member response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZSCORE", "missing-key", "Sam"), store); string(got) != "$-1\r\n" {
+		t.Fatalf("ZSCORE missing key response = %q", got)
+	}
+	if got := execute(testRESPCommand("SET", "string", "value"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZSCORE", "string", "member"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("ZSCORE wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZSCORE", "scores"), store); got[0] != '-' {
+		t.Fatalf("ZSCORE invalid arity response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()

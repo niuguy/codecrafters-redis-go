@@ -1002,6 +1002,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeZRank(arguments, store)
 	case isCommand(arguments[0], "ZCARD"):
 		return executeZCard(arguments, store)
+	case isCommand(arguments[0], "ZSCORE"):
+		return executeZScore(arguments, store)
 	case isCommand(arguments[0], "ZRANGE"):
 		return executeZRange(arguments, store)
 	case isCommand(arguments[0], "RPUSH"):
@@ -1512,6 +1514,26 @@ func executeZCard(arguments [][]byte, store map[string]redisValue) []byte {
 		return wrongTypeError()
 	}
 	return integerResponse(len(value.zset))
+}
+
+func executeZScore(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 3 {
+		return []byte("-ERR wrong number of arguments for 'zscore' command\r\n")
+	}
+
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return []byte("$-1\r\n")
+	}
+	if value.kind != zsetKind {
+		return wrongTypeError()
+	}
+
+	score, ok := value.zset[string(arguments[2])]
+	if !ok {
+		return []byte("$-1\r\n")
+	}
+	return bulkString([]byte(strconv.FormatFloat(score, 'g', -1, 64)))
 }
 
 func executeZRange(arguments [][]byte, store map[string]redisValue) []byte {
