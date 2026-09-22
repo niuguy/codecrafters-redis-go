@@ -741,7 +741,13 @@ func TestBitOpAndCommand(t *testing.T) {
 	if got := execute(testRESPCommand("STRLEN", "missing-source-result"), store); string(got) != ":0\r\n" {
 		t.Fatalf("BITOP missing source length = %q", got)
 	}
-	if got := execute(testRESPCommand("BITOP", "OR", "result", "first"), store); string(got) != "-ERR syntax error\r\n" {
+	if got := execute(testRESPCommand("BITOP", "OR", "result", "first", "second"), store); string(got) != ":3\r\n" {
+		t.Fatalf("BITOP OR response = %q", got)
+	}
+	if got := execute(testRESPCommand("GET", "result"), store); string(got) != string(bulkString([]byte{0xfc, 0x3f, 0xff})) {
+		t.Fatalf("BITOP OR result = %q", got)
+	}
+	if got := execute(testRESPCommand("BITOP", "XOR", "result", "first", "second"), store); string(got) != "-ERR syntax error\r\n" {
 		t.Fatalf("BITOP unsupported operation response = %q", got)
 	}
 	if got := execute(testRESPCommand("BITOP", "AND", "result", "first", "missing"), store); string(got) != ":2\r\n" {

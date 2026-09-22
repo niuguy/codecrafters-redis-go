@@ -1508,7 +1508,9 @@ func executeGetBit(arguments [][]byte, store map[string]redisValue) []byte {
 }
 
 func executeBitOp(arguments [][]byte, store map[string]redisValue) []byte {
-	if len(arguments) < 4 || !isCommand(arguments[1], "AND") {
+	and := isCommand(arguments[1], "AND")
+	or := isCommand(arguments[1], "OR")
+	if len(arguments) < 4 || (!and && !or) {
 		return []byte("-ERR syntax error\r\n")
 	}
 
@@ -1530,13 +1532,22 @@ func executeBitOp(arguments [][]byte, store map[string]redisValue) []byte {
 
 	result := make([]byte, maxLength)
 	for index := range result {
-		result[index] = 0xff
+		if and {
+			result[index] = 0xff
+		}
 		for _, source := range sources {
 			if index >= len(source) {
-				result[index] = 0
-				break
+				if and {
+					result[index] = 0
+					break
+				}
+				continue
 			}
-			result[index] &= source[index]
+			if and {
+				result[index] &= source[index]
+			} else {
+				result[index] |= source[index]
+			}
 		}
 	}
 
