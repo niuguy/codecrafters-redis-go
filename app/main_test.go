@@ -852,6 +852,39 @@ func TestGeoDistCommand(t *testing.T) {
 	}
 }
 
+func TestGeoSearchCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	execute(testRESPCommand("GEOADD", "places", "13.361389", "38.115556", "Palermo", "15.087269", "37.502669", "Catania"), store)
+
+	if got := execute(testRESPCommand("GEOSEARCH", "places", "FROMLONLAT", "15.087269", "37.502669", "BYRADIUS", "100", "km"), store); string(got) != "*1\r\n$7\r\nCatania\r\n" {
+		t.Fatalf("GEOSEARCH 100km response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEOSEARCH", "places", "FROMLONLAT", "15.087269", "37.502669", "BYRADIUS", "200", "km"), store); string(got) != "*2\r\n$7\r\nCatania\r\n$7\r\nPalermo\r\n" {
+		t.Fatalf("GEOSEARCH 200km response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEOSEARCH", "places", "FROMLONLAT", "15.087269", "37.502669", "BYRADIUS", "1", "mi"), store); string(got) != "*1\r\n$7\r\nCatania\r\n" {
+		t.Fatalf("GEOSEARCH miles response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEOSEARCH", "missing", "FROMLONLAT", "15", "37", "BYRADIUS", "100", "km"), store); string(got) != "*0\r\n" {
+		t.Fatalf("GEOSEARCH missing key response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEOSEARCH", "places", "FROMLONLAT", "15", "37", "BYRADIUS", "100", "yards"), store); got[0] != '-' {
+		t.Fatalf("GEOSEARCH invalid unit response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEOSEARCH", "places", "FROMLONLAT", "181", "37", "BYRADIUS", "100", "km"), store); got[0] != '-' {
+		t.Fatalf("GEOSEARCH invalid longitude response = %q", got)
+	}
+	if got := execute(testRESPCommand("SET", "string", "value"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEOSEARCH", "string", "FROMLONLAT", "15", "37", "BYRADIUS", "100", "km"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("GEOSEARCH wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEOSEARCH", "places", "BYBOX", "15", "37", "100", "100", "km"), store); got[0] != '-' {
+		t.Fatalf("GEOSEARCH unsupported mode response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()

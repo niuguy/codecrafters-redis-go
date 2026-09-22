@@ -1028,6 +1028,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeGeoPos(arguments, store)
 	case isCommand(arguments[0], "GEODIST"):
 		return executeGeoDist(arguments, store)
+	case isCommand(arguments[0], "GEOSEARCH"):
+		return executeGeoSearch(arguments, store)
 	case isCommand(arguments[0], "ZADD"):
 		return executeZAdd(arguments, store)
 	case isCommand(arguments[0], "ZREM"):
@@ -1816,6 +1818,71 @@ func geoDistanceMeters(longitude1, latitude1, longitude2, latitude2 float64) flo
 		a = 1
 	}
 	return earthRadiusMeters * 2 * math.Asin(math.Sqrt(a))
+}
+
+func executeGeoSearch(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 8 || !isCommand(arguments[2], "FROMLONLAT") || !isCommand(arguments[5], "BYRADIUS") {
+		return []byte("-ERR syntax error\r\n")
+	}
+
+	longitude, longitudeErr := strconv.ParseFloat(string(arguments[3]), 64)
+	latitude, latitudeErr := strconv.ParseFloat(string(arguments[4]), 64)
+	radius, radiusErr := strconv.ParseFloat(string(arguments[6]), 64)
+	if longitudeErr != nil || latitudeErr != nil || radiusErr != nil ||
+		math.IsNaN(longitude) || math.IsNaN(latitude) || math.IsNaN(radius) || math.IsInf(radius, 0) ||
+		longitude < -180 || longitude > 180 ||
+		latitude < -85.05112878 || latitude > 85.05112878 || radius < 0 {
+		return []byte("-ERR invalid geospatial search parameters\r\n")
+	}
+
+	unit := strings.ToLower(string(arguments[7]))
+	switch unit {
+	case "m":
+	case "km":
+		radius *= 1000
+	case "mi":
+		radius *= 1609.344
+	case "ft":
+		radius /= 3.280839895013123
+	default:
+		return []byte("-ERR unsupported unit provided\r\n")
+	}
+
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return arrayResponse(nil)
+	}
+	if value.kind != zsetKind {
+		return wrongTypeError()
+	}
+
+	type result struct {
+		member   string
+		distance float64
+	}
+	results := make([]result, 0, len(value.zset))
+	for member, score := range value.zset {
+		memberLongitude, memberLatitude := geoHashPosition(score)
+		distance := geoDistanceMeters(longitude, latitude, memberLongitude, memberLatitude)
+		if distance <= radius {
+			results = append(results, result{member: member, distance: distance})
+		}
+	}
+	slices.SortFunc(results, func(left, right result) int {
+		if left.distance < right.distance {
+			return -1
+		}
+		if left.distance > right.distance {
+			return 1
+		}
+		return strings.Compare(left.member, right.member)
+	})
+
+	members := make([][]byte, 0, len(results))
+	for _, result := range results {
+		members = append(members, []byte(result.member))
+	}
+	return arrayResponse(members)
 }
 
 func parseBitPosition(raw []byte) (int, byte, bool) {
