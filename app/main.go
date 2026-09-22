@@ -767,6 +767,7 @@ func touchModifiedKeys(arguments [][]byte, response []byte, versions map[string]
 	case isCommand(command, "SET"),
 		isCommand(command, "INCR"),
 		isCommand(command, "SETBIT"),
+		isCommand(command, "GEOADD"),
 		isCommand(command, "RPUSH"),
 		isCommand(command, "LPUSH"),
 		isCommand(command, "ZADD"),
@@ -813,6 +814,7 @@ func isWriteCommand(arguments [][]byte) bool {
 		isCommand(arguments[0], "INCR"),
 		isCommand(arguments[0], "SETBIT"),
 		isCommand(arguments[0], "BITOP"),
+		isCommand(arguments[0], "GEOADD"),
 		isCommand(arguments[0], "RPUSH"),
 		isCommand(arguments[0], "LPUSH"),
 		isCommand(arguments[0], "LPOP"),
@@ -1614,21 +1616,86 @@ func executeBitCount(arguments [][]byte, store map[string]redisValue) []byte {
 }
 
 func executeGeoAdd(arguments [][]byte, store map[string]redisValue) []byte {
-	if len(arguments) != 5 {
+	if len(arguments) < 5 || (len(arguments)-2)%3 != 0 {
 		return []byte("-ERR wrong number of arguments for 'geoadd' command\r\n")
 	}
 
-	longitude, longitudeErr := strconv.ParseFloat(string(arguments[2]), 64)
-	latitude, latitudeErr := strconv.ParseFloat(string(arguments[3]), 64)
-	if longitudeErr != nil || latitudeErr != nil {
-		return []byte("-ERR invalid longitude,latitude pair\r\n")
+	type location struct {
+		longitude float64
+		latitude  float64
+		member    string
+		score     float64
 	}
-	if math.IsNaN(longitude) || math.IsNaN(latitude) ||
-		longitude < -180 || longitude > 180 ||
-		latitude < -85.05112878 || latitude > 85.05112878 {
-		return []byte(fmt.Sprintf("-ERR invalid longitude,latitude pair %.6f,%.6f\r\n", longitude, latitude))
+
+	locations := make([]location, 0, (len(arguments)-2)/3)
+	for i := 2; i < len(arguments); i += 3 {
+		longitude, longitudeErr := strconv.ParseFloat(string(arguments[i]), 64)
+		latitude, latitudeErr := strconv.ParseFloat(string(arguments[i+1]), 64)
+		if longitudeErr != nil || latitudeErr != nil {
+			return []byte("-ERR invalid longitude,latitude pair\r\n")
+		}
+		if math.IsNaN(longitude) || math.IsNaN(latitude) ||
+			longitude < -180 || longitude > 180 ||
+			latitude < -85.05112878 || latitude > 85.05112878 {
+			return []byte(fmt.Sprintf("-ERR invalid longitude,latitude pair %.6f,%.6f\r\n", longitude, latitude))
+		}
+		locations = append(locations, location{
+			longitude: longitude,
+			latitude:  latitude,
+			member:    string(arguments[i+2]),
+			score:     float64(geoHashScore(longitude, latitude)),
+		})
 	}
-	return integerResponse(1)
+
+	key := string(arguments[1])
+	value, ok := store[key]
+	if ok && value.kind != zsetKind {
+		return wrongTypeError()
+	}
+	if !ok {
+		value.kind = zsetKind
+	}
+	if value.zset == nil {
+		value.zset = make(map[string]float64)
+	}
+
+	added := 0
+	for _, location := range locations {
+		if _, exists := value.zset[location.member]; !exists {
+			added++
+		}
+		value.zset[location.member] = location.score
+	}
+	store[key] = value
+	return integerResponse(added)
+}
+
+func geoHashScore(longitude, latitude float64) uint64 {
+	const steps = 26
+	longitudeMin, longitudeMax := -180.0, 180.0
+	latitudeMin, latitudeMax := -85.05112878, 85.05112878
+	var score uint64
+
+	for step := 0; step < steps; step++ {
+		longitudeMid := (longitudeMin + longitudeMax) / 2
+		score <<= 1
+		if longitude >= longitudeMid {
+			score |= 1
+			longitudeMin = longitudeMid
+		} else {
+			longitudeMax = longitudeMid
+		}
+
+		latitudeMid := (latitudeMin + latitudeMax) / 2
+		score <<= 1
+		if latitude >= latitudeMid {
+			score |= 1
+			latitudeMin = latitudeMid
+		} else {
+			latitudeMax = latitudeMid
+		}
+	}
+	return score
 }
 
 func parseBitPosition(raw []byte) (int, byte, bool) {
@@ -1795,7 +1862,7 @@ func executeZScore(arguments [][]byte, store map[string]redisValue) []byte {
 	if !ok {
 		return []byte("$-1\r\n")
 	}
-	return bulkString([]byte(strconv.FormatFloat(score, 'g', -1, 64)))
+	return bulkString([]byte(strconv.FormatFloat(score, 'f', -1, 64)))
 }
 
 func executeZRange(arguments [][]byte, store map[string]redisValue) []byte {

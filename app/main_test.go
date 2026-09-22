@@ -766,7 +766,7 @@ func TestBitOpAndCommand(t *testing.T) {
 
 func TestGeoAddCommand(t *testing.T) {
 	store := make(map[string]redisValue)
-	if got := execute(testRESPCommand("GEOADD", "places", "-0.0884948", "51.506479", "London"), store); string(got) != ":1\r\n" {
+	if got := execute(testRESPCommand("GEOADD", "places", "2.2944692", "48.8584625", "London"), store); string(got) != ":1\r\n" {
 		t.Fatalf("GEOADD response = %q", got)
 	}
 	for _, command := range [][]string{
@@ -786,8 +786,14 @@ func TestGeoAddCommand(t *testing.T) {
 			t.Errorf("invalid GEOADD %v response = %q", command, got)
 		}
 	}
-	if len(store) != 0 {
-		t.Fatalf("GEOADD unexpectedly stored location data: %#v", store)
+	if got := execute(testRESPCommand("ZCARD", "places"), store); string(got) != ":3\r\n" {
+		t.Fatalf("GEOADD sorted set cardinality = %q", got)
+	}
+	if got := execute(testRESPCommand("ZSCORE", "places", "London"), store); string(got) != "$16\r\n3663832614298053\r\n" {
+		t.Fatalf("GEOADD London score = %q", got)
+	}
+	if got := execute(testRESPCommand("GEOADD", "places", "2.2944692", "48.8584625", "London"), store); string(got) != ":0\r\n" {
+		t.Fatalf("GEOADD existing location response = %q", got)
 	}
 }
 
