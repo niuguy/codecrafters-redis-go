@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/bits"
 	"net"
 	"os"
 	"path/filepath"
@@ -1010,6 +1011,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeGetBit(arguments, store)
 	case isCommand(arguments[0], "STRLEN"):
 		return executeStrLen(arguments, store)
+	case isCommand(arguments[0], "BITCOUNT"):
+		return executeBitCount(arguments, store)
 	case isCommand(arguments[0], "ZADD"):
 		return executeZAdd(arguments, store)
 	case isCommand(arguments[0], "ZREM"):
@@ -1510,6 +1513,47 @@ func executeStrLen(arguments [][]byte, store map[string]redisValue) []byte {
 		return wrongTypeError()
 	}
 	return integerResponse(len(value.string))
+}
+
+func executeBitCount(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) != 2 && len(arguments) != 4 {
+		return []byte("-ERR syntax error\r\n")
+	}
+
+	start, stop := 0, -1
+	if len(arguments) == 4 {
+		var err error
+		start, err = strconv.Atoi(string(arguments[2]))
+		if err != nil {
+			return []byte("-ERR value is not an integer or out of range\r\n")
+		}
+		stop, err = strconv.Atoi(string(arguments[3]))
+		if err != nil {
+			return []byte("-ERR value is not an integer or out of range\r\n")
+		}
+	}
+
+	value, ok := store[string(arguments[1])]
+	if !ok {
+		return integerResponse(0)
+	}
+	if value.kind != stringKind {
+		return wrongTypeError()
+	}
+
+	if len(arguments) == 2 {
+		start, stop = 0, len(value.string)-1
+	}
+	start, stop, ok = listRange(start, stop, len(value.string))
+	if !ok {
+		return integerResponse(0)
+	}
+
+	count := 0
+	for _, value := range value.string[start : stop+1] {
+		count += bits.OnesCount8(value)
+	}
+	return integerResponse(count)
 }
 
 func parseBitPosition(raw []byte) (int, byte, bool) {

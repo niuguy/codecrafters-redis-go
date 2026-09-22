@@ -683,6 +683,43 @@ func TestStrLenCommand(t *testing.T) {
 	}
 }
 
+func TestBitCountCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	if got := execute(testRESPCommand("BITCOUNT", "missing"), store); string(got) != ":0\r\n" {
+		t.Fatalf("BITCOUNT missing key response = %q", got)
+	}
+	if got := execute(testRESPCommand("SET", "bitmap", string([]byte{0xf0, 0x0f, 0x01})), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET binary value response = %q", got)
+	}
+	if got := execute(testRESPCommand("BITCOUNT", "bitmap"), store); string(got) != ":9\r\n" {
+		t.Fatalf("BITCOUNT whole string response = %q", got)
+	}
+	if got := execute(testRESPCommand("BITCOUNT", "bitmap", "0", "0"), store); string(got) != ":4\r\n" {
+		t.Fatalf("BITCOUNT first byte response = %q", got)
+	}
+	if got := execute(testRESPCommand("BITCOUNT", "bitmap", "-2", "-1"), store); string(got) != ":5\r\n" {
+		t.Fatalf("BITCOUNT negative range response = %q", got)
+	}
+	if got := execute(testRESPCommand("BITCOUNT", "bitmap", "10", "20"), store); string(got) != ":0\r\n" {
+		t.Fatalf("BITCOUNT out-of-range response = %q", got)
+	}
+	if got := execute(testRESPCommand("SET", "string", "value"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("BITCOUNT", "string", "bad", "1"), store); string(got) != "-ERR value is not an integer or out of range\r\n" {
+		t.Fatalf("BITCOUNT invalid range response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZADD", "zset", "1", "member"), store); string(got) != ":1\r\n" {
+		t.Fatalf("ZADD response = %q", got)
+	}
+	if got := execute(testRESPCommand("BITCOUNT", "zset"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("BITCOUNT wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("BITCOUNT", "bitmap", "0"), store); got[0] != '-' {
+		t.Fatalf("BITCOUNT invalid arity response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()
