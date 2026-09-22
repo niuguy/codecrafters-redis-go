@@ -776,6 +776,8 @@ func touchModifiedKeys(arguments [][]byte, response []byte, versions map[string]
 			!bytes.Equal(response, []byte("*0\r\n")) {
 			versions[key]++
 		}
+	case isCommand(command, "ZREM") && !bytes.Equal(response, []byte(":0\r\n")):
+		versions[key]++
 	}
 }
 
@@ -787,6 +789,9 @@ func shouldPropagateCommand(arguments [][]byte, response []byte) bool {
 		(bytes.Equal(response, []byte("$-1\r\n")) ||
 			bytes.Equal(response, []byte("*-1\r\n")) ||
 			bytes.Equal(response, []byte("*0\r\n"))) {
+		return false
+	}
+	if isCommand(arguments[0], "ZREM") && bytes.Equal(response, []byte(":0\r\n")) {
 		return false
 	}
 	return true
@@ -804,6 +809,7 @@ func isWriteCommand(arguments [][]byte) bool {
 		isCommand(arguments[0], "LPUSH"),
 		isCommand(arguments[0], "LPOP"),
 		isCommand(arguments[0], "ZADD"),
+		isCommand(arguments[0], "ZREM"),
 		isCommand(arguments[0], "XADD"):
 		return true
 	default:
@@ -998,6 +1004,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeIncr(arguments, store)
 	case isCommand(arguments[0], "ZADD"):
 		return executeZAdd(arguments, store)
+	case isCommand(arguments[0], "ZREM"):
+		return executeZRem(arguments, store)
 	case isCommand(arguments[0], "ZRANK"):
 		return executeZRank(arguments, store)
 	case isCommand(arguments[0], "ZCARD"):
@@ -1454,6 +1462,37 @@ func executeZAdd(arguments [][]byte, store map[string]redisValue) []byte {
 	}
 	store[key] = value
 	return integerResponse(added)
+}
+
+func executeZRem(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) < 3 {
+		return []byte("-ERR wrong number of arguments for 'zrem' command\r\n")
+	}
+
+	key := string(arguments[1])
+	value, ok := store[key]
+	if !ok {
+		return integerResponse(0)
+	}
+	if value.kind != zsetKind {
+		return wrongTypeError()
+	}
+
+	removed := 0
+	for _, argument := range arguments[2:] {
+		member := string(argument)
+		if _, exists := value.zset[member]; !exists {
+			continue
+		}
+		delete(value.zset, member)
+		removed++
+	}
+	if len(value.zset) == 0 {
+		delete(store, key)
+	} else {
+		store[key] = value
+	}
+	return integerResponse(removed)
 }
 
 type sortedSetMember struct {

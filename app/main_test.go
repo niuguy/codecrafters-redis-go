@@ -432,6 +432,37 @@ func TestZAddCommand(t *testing.T) {
 	}
 }
 
+func TestZRemCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	execute(testRESPCommand("ZADD", "scores", "8.0", "Sam", "7.0", "Alex"), store)
+
+	if got := execute(testRESPCommand("ZREM", "scores", "Sam", "missing", "Sam"), store); string(got) != ":1\r\n" {
+		t.Fatalf("ZREM response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZCARD", "scores"), store); string(got) != ":1\r\n" {
+		t.Fatalf("ZCARD after ZREM response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZREM", "scores", "Alex"), store); string(got) != ":1\r\n" {
+		t.Fatalf("ZREM final member response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZCARD", "scores"), store); string(got) != ":0\r\n" {
+		t.Fatalf("ZCARD after deleting sorted set response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZREM", "missing-key", "member"), store); string(got) != ":0\r\n" {
+		t.Fatalf("ZREM missing key response = %q", got)
+	}
+
+	if got := execute(testRESPCommand("SET", "string", "value"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZREM", "string", "member"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("ZREM wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZREM", "scores"), store); got[0] != '-' {
+		t.Fatalf("ZREM invalid arity response = %q", got)
+	}
+}
+
 func TestZRankCommand(t *testing.T) {
 	store := make(map[string]redisValue)
 	execute(testRESPCommand("ZADD", "scores", "8.0", "Sam", "7.0", "Alex", "7.0", "Bob"), store)
