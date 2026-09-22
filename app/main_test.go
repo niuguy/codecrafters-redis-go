@@ -400,6 +400,38 @@ func TestStringCommands(t *testing.T) {
 	}
 }
 
+func TestZAddCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+
+	if got := execute(testRESPCommand("ZADD", "racer_scores", "8.0", "Sam"), store); string(got) != ":1\r\n" {
+		t.Fatalf("first ZADD response = %q", got)
+	}
+	if value := store["racer_scores"]; value.kind != zsetKind || value.zset["Sam"] != 8.0 {
+		t.Fatalf("stored sorted set = %#v", value)
+	}
+
+	if got := execute(testRESPCommand("ZADD", "racer_scores", "9.5", "Sam", "7.0", "Alex"), store); string(got) != ":1\r\n" {
+		t.Fatalf("update and add ZADD response = %q", got)
+	}
+	value := store["racer_scores"]
+	if len(value.zset) != 2 || value.zset["Sam"] != 9.5 || value.zset["Alex"] != 7.0 {
+		t.Fatalf("updated sorted set = %#v", value.zset)
+	}
+
+	if got := execute(testRESPCommand("ZADD", "racer_scores", "bad", "Lee"), store); string(got) != "-ERR value is not a valid float\r\n" {
+		t.Fatalf("invalid score response = %q", got)
+	}
+	if got := execute(testRESPCommand("SET", "string", "value"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZADD", "string", "1", "member"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZADD", "racer_scores", "1"), store); got[0] != '-' {
+		t.Fatalf("invalid arity response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()

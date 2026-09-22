@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -94,6 +95,7 @@ type redisValue struct {
 	kind   valueKind
 	string []byte
 	list   [][]byte
+	zset   map[string]float64
 	stream []streamEntry
 }
 
@@ -761,6 +763,7 @@ func touchModifiedKeys(arguments [][]byte, response []byte, versions map[string]
 		isCommand(command, "INCR"),
 		isCommand(command, "RPUSH"),
 		isCommand(command, "LPUSH"),
+		isCommand(command, "ZADD"),
 		isCommand(command, "XADD"):
 		versions[key]++
 	case isCommand(command, "DEL"):
@@ -800,6 +803,7 @@ func isWriteCommand(arguments [][]byte) bool {
 		isCommand(arguments[0], "RPUSH"),
 		isCommand(arguments[0], "LPUSH"),
 		isCommand(arguments[0], "LPOP"),
+		isCommand(arguments[0], "ZADD"),
 		isCommand(arguments[0], "XADD"):
 		return true
 	default:
@@ -992,6 +996,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeGet(arguments, store)
 	case isCommand(arguments[0], "INCR"):
 		return executeIncr(arguments, store)
+	case isCommand(arguments[0], "ZADD"):
+		return executeZAdd(arguments, store)
 	case isCommand(arguments[0], "RPUSH"):
 		return executeRPush(arguments, store)
 	case isCommand(arguments[0], "LRANGE"):
@@ -1398,6 +1404,48 @@ func executeIncr(arguments [][]byte, store map[string]redisValue) []byte {
 		string: []byte(strconv.FormatInt(next, 10)),
 	}
 	return integer64Response(next)
+}
+
+func executeZAdd(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) < 4 || (len(arguments)-2)%2 != 0 {
+		return []byte("-ERR wrong number of arguments for 'zadd' command\r\n")
+	}
+
+	type entry struct {
+		score  float64
+		member string
+	}
+
+	entries := make([]entry, 0, (len(arguments)-2)/2)
+	for i := 2; i < len(arguments); i += 2 {
+		score, err := strconv.ParseFloat(string(arguments[i]), 64)
+		if err != nil || math.IsNaN(score) {
+			return []byte("-ERR value is not a valid float\r\n")
+		}
+		entries = append(entries, entry{score: score, member: string(arguments[i+1])})
+	}
+
+	key := string(arguments[1])
+	value, ok := store[key]
+	if ok && value.kind != zsetKind {
+		return wrongTypeError()
+	}
+	if !ok {
+		value.kind = zsetKind
+	}
+	if value.zset == nil {
+		value.zset = make(map[string]float64)
+	}
+
+	added := 0
+	for _, item := range entries {
+		if _, exists := value.zset[item.member]; !exists {
+			added++
+		}
+		value.zset[item.member] = item.score
+	}
+	store[key] = value
+	return integerResponse(added)
 }
 
 func executeRPush(arguments [][]byte, store map[string]redisValue) []byte {
