@@ -797,6 +797,31 @@ func TestGeoAddCommand(t *testing.T) {
 	}
 }
 
+func TestGeoPosCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	execute(testRESPCommand("GEOADD", "places", "2.2944692", "48.8584625", "London"), store)
+
+	want := "*1\r\n*2\r\n$17\r\n2.294471561908722\r\n$17\r\n48.85846255040142\r\n"
+	if got := execute(testRESPCommand("GEOPOS", "places", "London"), store); string(got) != want {
+		t.Fatalf("GEOPOS response = %q, want %q", got, want)
+	}
+	if got := execute(testRESPCommand("GEOPOS", "places", "missing"), store); string(got) != "*1\r\n*-1\r\n" {
+		t.Fatalf("GEOPOS missing member response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEOPOS", "missing-key", "London", "missing"), store); string(got) != "*2\r\n*-1\r\n*-1\r\n" {
+		t.Fatalf("GEOPOS missing key response = %q", got)
+	}
+	if got := execute(testRESPCommand("SET", "string", "value"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEOPOS", "string", "member"), store); string(got) != string(wrongTypeError()) {
+		t.Fatalf("GEOPOS wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("GEOPOS", "places"), store); got[0] != '-' {
+		t.Fatalf("GEOPOS invalid arity response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()

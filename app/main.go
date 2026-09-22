@@ -1024,6 +1024,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeBitCount(arguments, store)
 	case isCommand(arguments[0], "GEOADD"):
 		return executeGeoAdd(arguments, store)
+	case isCommand(arguments[0], "GEOPOS"):
+		return executeGeoPos(arguments, store)
 	case isCommand(arguments[0], "ZADD"):
 		return executeZAdd(arguments, store)
 	case isCommand(arguments[0], "ZREM"):
@@ -1696,6 +1698,60 @@ func geoHashScore(longitude, latitude float64) uint64 {
 		}
 	}
 	return score
+}
+
+func executeGeoPos(arguments [][]byte, store map[string]redisValue) []byte {
+	if len(arguments) < 3 {
+		return []byte("-ERR wrong number of arguments for 'geopos' command\r\n")
+	}
+
+	value, ok := store[string(arguments[1])]
+	if ok && value.kind != zsetKind {
+		return wrongTypeError()
+	}
+
+	responses := make([][]byte, 0, len(arguments)-2)
+	for _, argument := range arguments[2:] {
+		if !ok {
+			responses = append(responses, []byte("*-1\r\n"))
+			continue
+		}
+		score, exists := value.zset[string(argument)]
+		if !exists {
+			responses = append(responses, []byte("*-1\r\n"))
+			continue
+		}
+		longitude, latitude := geoHashPosition(score)
+		position := appendArrayHeader(nil, 2)
+		position = append(position, bulkString([]byte(strconv.FormatFloat(longitude, 'g', -1, 64)))...)
+		position = append(position, bulkString([]byte(strconv.FormatFloat(latitude, 'g', -1, 64)))...)
+		responses = append(responses, position)
+	}
+	return rawArrayResponse(responses)
+}
+
+func geoHashPosition(score float64) (float64, float64) {
+	const steps = 26
+	longitudeMin, longitudeMax := -180.0, 180.0
+	latitudeMin, latitudeMax := -85.05112878, 85.05112878
+	bits := uint64(score)
+
+	for step := 0; step < steps; step++ {
+		longitudeMid := (longitudeMin + longitudeMax) / 2
+		if bits&(uint64(1)<<uint(51-2*step)) != 0 {
+			longitudeMin = longitudeMid
+		} else {
+			longitudeMax = longitudeMid
+		}
+
+		latitudeMid := (latitudeMin + latitudeMax) / 2
+		if bits&(uint64(1)<<uint(50-2*step)) != 0 {
+			latitudeMin = latitudeMid
+		} else {
+			latitudeMax = latitudeMid
+		}
+	}
+	return (longitudeMin + longitudeMax) / 2, (latitudeMin + latitudeMax) / 2
 }
 
 func parseBitPosition(raw []byte) (int, byte, bool) {
