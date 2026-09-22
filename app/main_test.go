@@ -432,6 +432,37 @@ func TestZAddCommand(t *testing.T) {
 	}
 }
 
+func TestZRankCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	execute(testRESPCommand("ZADD", "scores", "8.0", "Sam", "7.0", "Alex", "7.0", "Bob"), store)
+
+	for _, testCase := range []struct {
+		member string
+		want   string
+	}{
+		{member: "Alex", want: ":0\r\n"},
+		{member: "Bob", want: ":1\r\n"},
+		{member: "Sam", want: ":2\r\n"},
+		{member: "missing", want: "$-1\r\n"},
+	} {
+		if got := execute(testRESPCommand("ZRANK", "scores", testCase.member), store); string(got) != testCase.want {
+			t.Errorf("ZRANK %s response = %q, want %q", testCase.member, got, testCase.want)
+		}
+	}
+	if got := execute(testRESPCommand("ZRANK", "missing-key", "member"), store); string(got) != "$-1\r\n" {
+		t.Errorf("ZRANK missing key response = %q", got)
+	}
+	if got := execute(testRESPCommand("SET", "string", "value"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZRANK", "string", "member"), store); string(got) != string(wrongTypeError()) {
+		t.Errorf("ZRANK wrong type response = %q", got)
+	}
+	if got := execute(testRESPCommand("ZRANK", "scores"), store); got[0] != '-' {
+		t.Errorf("ZRANK invalid arity response = %q", got)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()
