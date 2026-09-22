@@ -764,6 +764,16 @@ func TestBitOpAndCommand(t *testing.T) {
 	}
 }
 
+func TestGeoAddCommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	if got := execute(testRESPCommand("GEOADD", "places", "-0.0884948", "51.506479", "London"), store); string(got) != ":1\r\n" {
+		t.Fatalf("GEOADD response = %q", got)
+	}
+	if len(store) != 0 {
+		t.Fatalf("GEOADD unexpectedly stored location data: %#v", store)
+	}
+}
+
 func TestInfoCommand(t *testing.T) {
 	previousRole := serverRole
 	defer func() { serverRole = previousRole }()

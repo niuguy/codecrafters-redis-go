@@ -1020,6 +1020,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeStrLen(arguments, store)
 	case isCommand(arguments[0], "BITCOUNT"):
 		return executeBitCount(arguments, store)
+	case isCommand(arguments[0], "GEOADD"):
+		return executeGeoAdd(arguments, store)
 	case isCommand(arguments[0], "ZADD"):
 		return executeZAdd(arguments, store)
 	case isCommand(arguments[0], "ZREM"):
@@ -1609,6 +1611,10 @@ func executeBitCount(arguments [][]byte, store map[string]redisValue) []byte {
 		count += bits.OnesCount8(value)
 	}
 	return integerResponse(count)
+}
+
+func executeGeoAdd(arguments [][]byte, store map[string]redisValue) []byte {
+	return integerResponse(1)
 }
 
 func parseBitPosition(raw []byte) (int, byte, bool) {
