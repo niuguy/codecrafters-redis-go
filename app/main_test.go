@@ -144,6 +144,41 @@ func TestEnsureAppendOnlyDirectory(t *testing.T) {
 	}
 }
 
+func TestEnsureAppendOnlyFiles(t *testing.T) {
+	root := t.TempDir()
+	config := serverConfig{
+		dir:            root,
+		appendOnly:     "yes",
+		appendDirName:  "appendonlydir",
+		appendFilename: "appendonly.aof",
+	}
+	if err := ensureAppendOnlyFiles(config); err != nil {
+		t.Fatalf("create append-only files: %v", err)
+	}
+	path := filepath.Join(root, "appendonlydir", "appendonly.aof.1.incr.aof")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat incremental AOF: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("incremental AOF size = %d, want 0", info.Size())
+	}
+
+	if err := os.WriteFile(path, []byte("existing"), 0o644); err != nil {
+		t.Fatalf("write existing AOF: %v", err)
+	}
+	if err := ensureAppendOnlyFiles(config); err != nil {
+		t.Fatalf("reopen append-only files: %v", err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read existing AOF: %v", err)
+	}
+	if string(contents) != "existing" {
+		t.Fatalf("existing AOF was overwritten: %q", contents)
+	}
+}
+
 func TestConfigGetCommand(t *testing.T) {
 	previousDir := configuredDir
 	previousDBFilename := configuredDBFilename

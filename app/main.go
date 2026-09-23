@@ -188,8 +188,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := ensureAppendOnlyDirectory(config); err != nil {
-		log.Fatalf("failed to create append-only directory: %v", err)
+	if err := ensureAppendOnlyFiles(config); err != nil {
+		log.Fatalf("failed to initialize append-only files: %v", err)
 	}
 	serverRole = config.role()
 	configuredDir = config.dir
@@ -336,6 +336,22 @@ func ensureAppendOnlyDirectory(config serverConfig) error {
 		return nil
 	}
 	return os.MkdirAll(filepath.Join(config.dir, config.appendDirName), 0o755)
+}
+
+func ensureAppendOnlyFiles(config serverConfig) error {
+	if err := ensureAppendOnlyDirectory(config); err != nil {
+		return err
+	}
+	if !strings.EqualFold(config.appendOnly, "yes") {
+		return nil
+	}
+
+	path := filepath.Join(config.dir, config.appendDirName, config.appendFilename+".1.incr.aof")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	return file.Close()
 }
 
 func (config serverConfig) role() string {
