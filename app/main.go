@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -43,6 +44,13 @@ var configuredAppendOnly = defaultAppendOnly
 var configuredAppendDir = defaultAppendDir
 var configuredAppendFile = defaultAppendFile
 var configuredAppendSync = defaultAppendSync
+
+type aclUserState struct {
+	nopass    bool
+	passwords []string
+}
+
+var defaultACLUser = aclUserState{nopass: true}
 
 var replicationPing = []byte("*1\r\n$4\r\nPING\r\n")
 
@@ -2589,12 +2597,47 @@ func executeACL(arguments [][]byte, username string) []byte {
 		if string(arguments[2]) != "default" {
 			return []byte("*-1\r\n")
 		}
+		flags := make([][]byte, 0, 1)
+		if defaultACLUser.nopass {
+			flags = append(flags, []byte("nopass"))
+		}
+		passwords := make([][]byte, 0, len(defaultACLUser.passwords))
+		for _, password := range defaultACLUser.passwords {
+			passwords = append(passwords, []byte(password))
+		}
 		return rawArrayResponse([][]byte{
 			bulkString([]byte("flags")),
-			arrayResponse([][]byte{[]byte("nopass")}),
+			arrayResponse(flags),
 			bulkString([]byte("passwords")),
-			rawArrayResponse(nil),
+			arrayResponse(passwords),
 		})
+	}
+	if len(arguments) >= 4 && isCommand(arguments[1], "SETUSER") {
+		if string(arguments[2]) != "default" {
+			return []byte("-ERR User doesn't exist\r\n")
+		}
+		hashes := make([]string, 0, len(arguments)-3)
+		for _, rule := range arguments[3:] {
+			if len(rule) < 2 || rule[0] != '>' {
+				return []byte("-ERR ACL SETUSER only supports password rules in this stage\r\n")
+			}
+			digest := sha256.Sum256(rule[1:])
+			hashes = append(hashes, hex.EncodeToString(digest[:]))
+		}
+		for _, hash := range hashes {
+			found := false
+			for _, existing := range defaultACLUser.passwords {
+				if existing == hash {
+					found = true
+					break
+				}
+			}
+			if !found {
+				defaultACLUser.passwords = append(defaultACLUser.passwords, hash)
+			}
+		}
+		defaultACLUser.nopass = false
+		return []byte("+OK\r\n")
 	}
 	return []byte("-ERR wrong number of arguments for 'acl' command\r\n")
 }

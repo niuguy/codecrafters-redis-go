@@ -596,6 +596,27 @@ func TestACLWhoAmICommand(t *testing.T) {
 	}
 }
 
+func TestACLSetUserPassword(t *testing.T) {
+	previous := defaultACLUser
+	defaultACLUser = aclUserState{nopass: true}
+	defer func() { defaultACLUser = previous }()
+
+	store := make(map[string]redisValue)
+	if got := execute(testRESPCommand("ACL", "SETUSER", "default", ">mypassword"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("ACL SETUSER response = %q", got)
+	}
+	want := "*4\r\n$5\r\nflags\r\n*0\r\n$9\r\npasswords\r\n*1\r\n$64\r\n89e01536ac207279409d4de1e5253e01f4a1769e696db0d6062ca9b8f56767c8\r\n"
+	if got := execute(testRESPCommand("ACL", "GETUSER", "default"), store); string(got) != want {
+		t.Fatalf("ACL GETUSER after SETUSER response = %q, want %q", got, want)
+	}
+	if got := execute(testRESPCommand("ACL", "SETUSER", "default", ">mypassword"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("duplicate ACL SETUSER response = %q", got)
+	}
+	if got := execute(testRESPCommand("ACL", "SETUSER", "missing", ">password"), store); got[0] != '-' {
+		t.Fatalf("ACL SETUSER unknown user response = %q", got)
+	}
+}
+
 func TestSetBitCommand(t *testing.T) {
 	store := make(map[string]redisValue)
 
