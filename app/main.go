@@ -133,6 +133,7 @@ type transactionContext struct {
 type clientState struct {
 	inMulti       bool
 	subscribed    bool
+	username      string
 	queue         [][]byte
 	watched       map[string]uint64
 	subscriptions map[string]struct{}
@@ -598,6 +599,10 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 			if event.client.inMulti {
 				event.client.queue = append(event.client.queue, cloneBytes(event.command))
 				event.response <- []byte("+QUEUED\r\n")
+				continue
+			}
+			if isCommand(arguments[0], "ACL") {
+				event.response <- executeACL(arguments, event.client.username)
 				continue
 			}
 		}
@@ -1066,6 +1071,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeConfig(arguments)
 	case isCommand(arguments[0], "INFO"):
 		return executeInfo(arguments, store)
+	case isCommand(arguments[0], "ACL"):
+		return executeACL(arguments, "default")
 	case isCommand(arguments[0], "REPLCONF"):
 		return executeReplConf(arguments)
 	case isCommand(arguments[0], "PSYNC"):
@@ -2574,6 +2581,13 @@ func readRDBString(data []byte, position int) ([]byte, int, error) {
 	return data[position : position+length], position + length, nil
 }
 
+func executeACL(arguments [][]byte, username string) []byte {
+	if len(arguments) != 2 || !isCommand(arguments[1], "WHOAMI") {
+		return []byte("-ERR wrong number of arguments for 'acl|whoami' command\r\n")
+	}
+	return bulkString([]byte(username))
+}
+
 func executeConfig(arguments [][]byte) []byte {
 	if len(arguments) < 3 || !isCommand(arguments[1], "GET") {
 		return []byte("-ERR wrong number of arguments for 'config get' command\r\n")
@@ -3119,6 +3133,7 @@ func readRESPFrame(reader *bufio.Reader) ([]byte, error) {
 
 func handleConn(conn net.Conn, events chan<- commandEvent) {
 	client := &clientState{
+		username: "default",
 		outbound: make(chan []byte, 64),
 		done:     make(chan struct{}),
 	}

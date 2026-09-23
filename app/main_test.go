@@ -574,6 +574,22 @@ func TestZScoreCommand(t *testing.T) {
 	}
 }
 
+func TestACLWhoAmICommand(t *testing.T) {
+	store := make(map[string]redisValue)
+	if got := execute(testRESPCommand("ACL", "WHOAMI"), store); string(got) != "$7\r\ndefault\r\n" {
+		t.Fatalf("ACL WHOAMI response = %q", got)
+	}
+	if got := executeACL(testRESPArguments("ACL", "WHOAMI"), "admin"); string(got) != "$5\r\nadmin\r\n" {
+		t.Fatalf("custom ACL WHOAMI response = %q", got)
+	}
+	if got := execute(testRESPCommand("ACL"), store); got[0] != '-' {
+		t.Fatalf("ACL invalid arity response = %q", got)
+	}
+	if got := execute(testRESPCommand("ACL", "LIST"), store); got[0] != '-' {
+		t.Fatalf("unsupported ACL subcommand response = %q", got)
+	}
+}
+
 func TestSetBitCommand(t *testing.T) {
 	store := make(map[string]redisValue)
 
