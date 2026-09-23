@@ -2582,10 +2582,19 @@ func readRDBString(data []byte, position int) ([]byte, int, error) {
 }
 
 func executeACL(arguments [][]byte, username string) []byte {
-	if len(arguments) != 2 || !isCommand(arguments[1], "WHOAMI") {
-		return []byte("-ERR wrong number of arguments for 'acl|whoami' command\r\n")
+	if len(arguments) == 2 && isCommand(arguments[1], "WHOAMI") {
+		return bulkString([]byte(username))
 	}
-	return bulkString([]byte(username))
+	if len(arguments) == 3 && isCommand(arguments[1], "GETUSER") {
+		if string(arguments[2]) != "default" {
+			return []byte("*-1\r\n")
+		}
+		return rawArrayResponse([][]byte{
+			bulkString([]byte("flags")),
+			rawArrayResponse(nil),
+		})
+	}
+	return []byte("-ERR wrong number of arguments for 'acl' command\r\n")
 }
 
 func executeConfig(arguments [][]byte) []byte {

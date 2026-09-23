@@ -579,6 +579,12 @@ func TestACLWhoAmICommand(t *testing.T) {
 	if got := execute(testRESPCommand("ACL", "WHOAMI"), store); string(got) != "$7\r\ndefault\r\n" {
 		t.Fatalf("ACL WHOAMI response = %q", got)
 	}
+	if got := execute(testRESPCommand("ACL", "GETUSER", "default"), store); string(got) != "*2\r\n$5\r\nflags\r\n*0\r\n" {
+		t.Fatalf("ACL GETUSER default response = %q", got)
+	}
+	if got := execute(testRESPCommand("ACL", "GETUSER", "missing"), store); string(got) != "*-1\r\n" {
+		t.Fatalf("ACL GETUSER missing response = %q", got)
+	}
 	if got := executeACL(testRESPArguments("ACL", "WHOAMI"), "admin"); string(got) != "$5\r\nadmin\r\n" {
 		t.Fatalf("custom ACL WHOAMI response = %q", got)
 	}
