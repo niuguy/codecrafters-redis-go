@@ -163,6 +163,14 @@ func TestEnsureAppendOnlyFiles(t *testing.T) {
 	if info.Size() != 0 {
 		t.Fatalf("incremental AOF size = %d, want 0", info.Size())
 	}
+	manifestPath := filepath.Join(root, "appendonlydir", "appendonly.aof.manifest")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read AOF manifest: %v", err)
+	}
+	if string(manifest) != "file appendonly.aof.1.incr.aof seq 1 type i\n" {
+		t.Fatalf("AOF manifest = %q", manifest)
+	}
 
 	if err := os.WriteFile(path, []byte("existing"), 0o644); err != nil {
 		t.Fatalf("write existing AOF: %v", err)

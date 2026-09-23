@@ -351,7 +351,13 @@ func ensureAppendOnlyFiles(config serverConfig) error {
 	if err != nil {
 		return err
 	}
-	return file.Close()
+	if err := file.Close(); err != nil {
+		return err
+	}
+
+	manifestPath := filepath.Join(config.dir, config.appendDirName, config.appendFilename+".manifest")
+	manifest := fmt.Sprintf("file %s seq 1 type i\n", config.appendFilename+".1.incr.aof")
+	return os.WriteFile(manifestPath, []byte(manifest), 0o644)
 }
 
 func (config serverConfig) role() string {
