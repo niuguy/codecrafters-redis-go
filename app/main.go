@@ -53,6 +53,8 @@ type aclUserState struct {
 
 var defaultACLUser = aclUserState{nopass: true}
 var aclMu sync.RWMutex
+var activeAOF *os.File
+var appendFsyncAlways bool
 
 var replicationPing = []byte("*1\r\n$4\r\nPING\r\n")
 
@@ -191,6 +193,14 @@ func main() {
 	if err := ensureAppendOnlyFiles(config); err != nil {
 		log.Fatalf("failed to initialize append-only files: %v", err)
 	}
+	activeAOF, err = openActiveAOF(config)
+	if err != nil {
+		log.Fatalf("failed to open append-only file: %v", err)
+	}
+	if activeAOF != nil {
+		defer activeAOF.Close()
+	}
+	appendFsyncAlways = strings.EqualFold(config.appendFsync, "always")
 	serverRole = config.role()
 	configuredDir = config.dir
 	configuredDBFilename = config.dbfilename
@@ -358,6 +368,31 @@ func ensureAppendOnlyFiles(config serverConfig) error {
 	manifestPath := filepath.Join(config.dir, config.appendDirName, config.appendFilename+".manifest")
 	manifest := fmt.Sprintf("file %s seq 1 type i\n", config.appendFilename+".1.incr.aof")
 	return os.WriteFile(manifestPath, []byte(manifest), 0o644)
+}
+
+func openActiveAOF(config serverConfig) (*os.File, error) {
+	if !strings.EqualFold(config.appendOnly, "yes") {
+		return nil, nil
+	}
+
+	manifestPath := filepath.Join(config.dir, config.appendDirName, config.appendFilename+".manifest")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+	var filename string
+	for _, line := range strings.Split(string(manifest), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 6 && fields[0] == "file" && fields[4] == "type" && fields[5] == "i" {
+			filename = fields[1]
+			break
+		}
+	}
+	if filename == "" {
+		return nil, errors.New("manifest does not contain an incremental AOF file")
+	}
+	path := filepath.Join(config.dir, config.appendDirName, filename)
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 }
 
 func (config serverConfig) role() string {
@@ -705,6 +740,7 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 
 		response := execute(event.command, store, len(replicas))
 		if err == nil {
+			appendAOFCommand(event.command, arguments, response)
 			touchModifiedKeys(arguments, response, versions)
 			scheduleExpiration(arguments, response, versions, events)
 			wakeAfterCommand(arguments, store, waiters, streamWaiters)
@@ -804,6 +840,7 @@ func executeTransaction(client *clientState, store map[string]redisValue, versio
 		response := execute(command, store, len(context.replicas))
 		replies = append(replies, response)
 		if err == nil {
+			appendAOFCommand(command, arguments, response)
 			touchModifiedKeys(arguments, response, versions)
 			scheduleExpiration(arguments, response, versions, context.events)
 			wakeAfterCommand(arguments, store, waiters, streamWaiters)
@@ -909,6 +946,21 @@ func isWriteCommand(arguments [][]byte) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func appendAOFCommand(command []byte, arguments [][]byte, response []byte) {
+	if activeAOF == nil || !isWriteCommand(arguments) || len(response) == 0 || response[0] == '-' {
+		return
+	}
+	if _, err := activeAOF.Write(command); err != nil {
+		log.Printf("error writing append-only file: %v", err)
+		return
+	}
+	if appendFsyncAlways {
+		if err := activeAOF.Sync(); err != nil {
+			log.Printf("error syncing append-only file: %v", err)
+		}
 	}
 }
 

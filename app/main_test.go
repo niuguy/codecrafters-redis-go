@@ -187,6 +187,42 @@ func TestEnsureAppendOnlyFiles(t *testing.T) {
 	}
 }
 
+func TestAppendAOFCommand(t *testing.T) {
+	root := t.TempDir()
+	config := serverConfig{
+		dir:            root,
+		appendOnly:     "yes",
+		appendDirName:  "appendonlydir",
+		appendFilename: "appendonly.aof",
+	}
+	if err := ensureAppendOnlyFiles(config); err != nil {
+		t.Fatalf("initialize AOF files: %v", err)
+	}
+	file, err := openActiveAOF(config)
+	if err != nil {
+		t.Fatalf("open active AOF: %v", err)
+	}
+	previousFile, previousFsync := activeAOF, appendFsyncAlways
+	activeAOF, appendFsyncAlways = file, true
+	defer func() {
+		_ = file.Close()
+		activeAOF, appendFsyncAlways = previousFile, previousFsync
+	}()
+
+	command := testRESPCommand("SET", "foo", "100")
+	appendAOFCommand(command, testRESPArguments("SET", "foo", "100"), []byte("+OK\r\n"))
+	if err := file.Close(); err != nil {
+		t.Fatalf("close AOF: %v", err)
+	}
+	contents, err := os.ReadFile(filepath.Join(root, "appendonlydir", "appendonly.aof.1.incr.aof"))
+	if err != nil {
+		t.Fatalf("read AOF: %v", err)
+	}
+	if !bytes.Equal(contents, command) {
+		t.Fatalf("AOF contents = %q, want %q", contents, command)
+	}
+}
+
 func TestConfigGetCommand(t *testing.T) {
 	previousDir := configuredDir
 	previousDBFilename := configuredDBFilename
