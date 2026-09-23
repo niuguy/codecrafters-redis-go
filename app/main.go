@@ -188,6 +188,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := ensureAppendOnlyDirectory(config); err != nil {
+		log.Fatalf("failed to create append-only directory: %v", err)
+	}
 	serverRole = config.role()
 	configuredDir = config.dir
 	configuredDBFilename = config.dbfilename
@@ -326,6 +329,13 @@ func parseServerConfig(arguments []string) (serverConfig, error) {
 		}
 	}
 	return config, nil
+}
+
+func ensureAppendOnlyDirectory(config serverConfig) error {
+	if !strings.EqualFold(config.appendOnly, "yes") {
+		return nil
+	}
+	return os.MkdirAll(filepath.Join(config.dir, config.appendDirName), 0o755)
 }
 
 func (config serverConfig) role() string {

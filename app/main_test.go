@@ -125,6 +125,25 @@ func TestParseServerConfig(t *testing.T) {
 	}
 }
 
+func TestEnsureAppendOnlyDirectory(t *testing.T) {
+	root := t.TempDir()
+	config := serverConfig{dir: root, appendOnly: "yes", appendDirName: "appendonlydir"}
+	if err := ensureAppendOnlyDirectory(config); err != nil {
+		t.Fatalf("create append-only directory: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(root, "appendonlydir")); err != nil || !info.IsDir() {
+		t.Fatalf("append-only directory was not created: info=%v err=%v", info, err)
+	}
+
+	withoutAOF := serverConfig{dir: root, appendOnly: "no", appendDirName: "should-not-exist"}
+	if err := ensureAppendOnlyDirectory(withoutAOF); err != nil {
+		t.Fatalf("disabled AOF returned an error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "should-not-exist")); !os.IsNotExist(err) {
+		t.Fatalf("AOF directory was created while appendonly was disabled: %v", err)
+	}
+}
+
 func TestConfigGetCommand(t *testing.T) {
 	previousDir := configuredDir
 	previousDBFilename := configuredDBFilename
