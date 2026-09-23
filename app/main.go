@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,6 +52,7 @@ type aclUserState struct {
 }
 
 var defaultACLUser = aclUserState{nopass: true}
+var aclMu sync.RWMutex
 
 var replicationPing = []byte("*1\r\n$4\r\nPING\r\n")
 
@@ -141,6 +143,7 @@ type transactionContext struct {
 type clientState struct {
 	inMulti       bool
 	subscribed    bool
+	authenticated bool
 	username      string
 	queue         [][]byte
 	watched       map[string]uint64
@@ -559,6 +562,10 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 				continue
 			}
 		}
+		if err == nil && event.client != nil && !event.client.authenticated && !isCommand(arguments[0], "AUTH") {
+			event.response <- []byte("-NOAUTH Authentication required.\r\n")
+			continue
+		}
 		if err == nil && event.client != nil && event.client.subscribed && !allowedInSubscribedMode(arguments[0]) {
 			commandName := strings.ToLower(string(arguments[0]))
 			event.response <- subscribedModeError(commandName)
@@ -616,6 +623,7 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 			if isCommand(arguments[0], "AUTH") {
 				response := executeAuth(arguments)
 				if len(response) > 0 && response[0] == '+' {
+					event.client.authenticated = true
 					event.client.username = string(arguments[1])
 				}
 				event.response <- response
@@ -2607,12 +2615,16 @@ func executeACL(arguments [][]byte, username string) []byte {
 		if string(arguments[2]) != "default" {
 			return []byte("*-1\r\n")
 		}
+		aclMu.RLock()
+		nopass := defaultACLUser.nopass
+		storedPasswords := append([]string(nil), defaultACLUser.passwords...)
+		aclMu.RUnlock()
 		flags := make([][]byte, 0, 1)
-		if defaultACLUser.nopass {
+		if nopass {
 			flags = append(flags, []byte("nopass"))
 		}
-		passwords := make([][]byte, 0, len(defaultACLUser.passwords))
-		for _, password := range defaultACLUser.passwords {
+		passwords := make([][]byte, 0, len(storedPasswords))
+		for _, password := range storedPasswords {
 			passwords = append(passwords, []byte(password))
 		}
 		return rawArrayResponse([][]byte{
@@ -2633,6 +2645,7 @@ func executeACL(arguments [][]byte, username string) []byte {
 			}
 			hashes = append(hashes, aclPasswordHash(rule[1:]))
 		}
+		aclMu.Lock()
 		for _, hash := range hashes {
 			found := false
 			for _, existing := range defaultACLUser.passwords {
@@ -2646,6 +2659,7 @@ func executeACL(arguments [][]byte, username string) []byte {
 			}
 		}
 		defaultACLUser.nopass = false
+		aclMu.Unlock()
 		return []byte("+OK\r\n")
 	}
 	return []byte("-ERR wrong number of arguments for 'acl' command\r\n")
@@ -2658,12 +2672,16 @@ func executeAuth(arguments [][]byte) []byte {
 	if string(arguments[1]) != "default" {
 		return []byte("-WRONGPASS invalid username-password pair or user is disabled.\r\n")
 	}
-	if defaultACLUser.nopass {
+	aclMu.RLock()
+	nopass := defaultACLUser.nopass
+	passwords := append([]string(nil), defaultACLUser.passwords...)
+	aclMu.RUnlock()
+	if nopass {
 		return []byte("+OK\r\n")
 	}
 
 	hash := aclPasswordHash(arguments[2])
-	for _, password := range defaultACLUser.passwords {
+	for _, password := range passwords {
 		if password == hash {
 			return []byte("+OK\r\n")
 		}
@@ -3220,10 +3238,14 @@ func readRESPFrame(reader *bufio.Reader) ([]byte, error) {
 }
 
 func handleConn(conn net.Conn, events chan<- commandEvent) {
+	aclMu.RLock()
+	authenticated := defaultACLUser.nopass
+	aclMu.RUnlock()
 	client := &clientState{
-		username: "default",
-		outbound: make(chan []byte, 64),
-		done:     make(chan struct{}),
+		authenticated: authenticated,
+		username:      "default",
+		outbound:      make(chan []byte, 64),
+		done:          make(chan struct{}),
 	}
 	go func() {
 		for {
