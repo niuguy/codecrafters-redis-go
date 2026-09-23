@@ -223,6 +223,94 @@ func TestAppendAOFCommand(t *testing.T) {
 	}
 }
 
+func TestReplayAOF(t *testing.T) {
+	root := t.TempDir()
+	config := serverConfig{
+		dir:            root,
+		appendOnly:     "yes",
+		appendDirName:  "appendonlydir",
+		appendFilename: "appendonly.aof",
+	}
+	if err := ensureAppendOnlyFiles(config); err != nil {
+		t.Fatalf("initialize AOF files: %v", err)
+	}
+
+	path := filepath.Join(root, "appendonlydir", "appendonly.aof.1.incr.aof")
+	commands := append(
+		testRESPCommand("SET", "foo", "bar"),
+		testRESPCommand("SETBIT", "bitmap", "3", "1")...,
+	)
+	if err := os.WriteFile(path, commands, 0o644); err != nil {
+		t.Fatalf("write AOF fixture: %v", err)
+	}
+
+	store := make(map[string]redisValue)
+	if err := replayAOF(config, store); err != nil {
+		t.Fatalf("replay AOF: %v", err)
+	}
+	if got := execute(testRESPCommand("GET", "foo"), store); string(got) != "$3\r\nbar\r\n" {
+		t.Fatalf("replayed SET response = %q", got)
+	}
+	if got := execute(testRESPCommand("GET", "bitmap"), store); string(got) != "$1\r\n\x10\r\n" {
+		t.Fatalf("replayed SETBIT response = %q", got)
+	}
+}
+
+func TestReplayAOFPreservesManifestSelection(t *testing.T) {
+	root := t.TempDir()
+	config := serverConfig{
+		dir:            root,
+		appendOnly:     "yes",
+		appendDirName:  "appendonlydir",
+		appendFilename: "appendonly.aof",
+	}
+	if err := ensureAppendOnlyFiles(config); err != nil {
+		t.Fatalf("initialize AOF files: %v", err)
+	}
+	manifestPath := filepath.Join(root, "appendonlydir", "appendonly.aof.manifest")
+	customName := "appendonly.aof.7.incr.aof"
+	if err := os.WriteFile(manifestPath, []byte("file "+customName+" seq 7 type i\n"), 0o644); err != nil {
+		t.Fatalf("write custom manifest: %v", err)
+	}
+	customPath := filepath.Join(root, "appendonlydir", customName)
+	if err := os.WriteFile(customPath, testRESPCommand("SET", "custom", "value"), 0o644); err != nil {
+		t.Fatalf("write custom AOF: %v", err)
+	}
+	if err := ensureAppendOnlyFiles(config); err != nil {
+		t.Fatalf("preserve custom manifest: %v", err)
+	}
+
+	store := make(map[string]redisValue)
+	if err := replayAOF(config, store); err != nil {
+		t.Fatalf("replay custom AOF: %v", err)
+	}
+	if got := execute(testRESPCommand("GET", "custom"), store); string(got) != "$5\r\nvalue\r\n" {
+		t.Fatalf("custom AOF replay response = %q", got)
+	}
+}
+
+func TestReplayAOFRejectsTruncatedCommand(t *testing.T) {
+	root := t.TempDir()
+	config := serverConfig{
+		dir:            root,
+		appendOnly:     "yes",
+		appendDirName:  "appendonlydir",
+		appendFilename: "appendonly.aof",
+	}
+	if err := ensureAppendOnlyFiles(config); err != nil {
+		t.Fatalf("initialize AOF files: %v", err)
+	}
+	path := filepath.Join(root, "appendonlydir", "appendonly.aof.1.incr.aof")
+	truncated := testRESPCommand("SET", "foo", "bar")
+	truncated = truncated[:len(truncated)-2]
+	if err := os.WriteFile(path, truncated, 0o644); err != nil {
+		t.Fatalf("write truncated AOF: %v", err)
+	}
+	if err := replayAOF(config, make(map[string]redisValue)); err == nil {
+		t.Fatal("truncated AOF replay returned nil error")
+	}
+}
+
 func TestConfigGetCommand(t *testing.T) {
 	previousDir := configuredDir
 	previousDBFilename := configuredDBFilename

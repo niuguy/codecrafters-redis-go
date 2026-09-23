@@ -193,14 +193,6 @@ func main() {
 	if err := ensureAppendOnlyFiles(config); err != nil {
 		log.Fatalf("failed to initialize append-only files: %v", err)
 	}
-	activeAOF, err = openActiveAOF(config)
-	if err != nil {
-		log.Fatalf("failed to open append-only file: %v", err)
-	}
-	if activeAOF != nil {
-		defer activeAOF.Close()
-	}
-	appendFsyncAlways = strings.EqualFold(config.appendFsync, "always")
 	serverRole = config.role()
 	configuredDir = config.dir
 	configuredDBFilename = config.dbfilename
@@ -213,6 +205,17 @@ func main() {
 		log.Printf("Could not load RDB file: %v", err)
 		store = make(map[string]redisValue)
 	}
+	if err := replayAOF(config, store); err != nil {
+		log.Fatalf("failed to replay append-only file: %v", err)
+	}
+	activeAOF, err = openActiveAOF(config)
+	if err != nil {
+		log.Fatalf("failed to open append-only file: %v", err)
+	}
+	if activeAOF != nil {
+		defer activeAOF.Close()
+	}
+	appendFsyncAlways = strings.EqualFold(config.appendFsync, "always")
 	address := net.JoinHostPort("0.0.0.0", strconv.Itoa(config.port))
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
@@ -367,18 +370,29 @@ func ensureAppendOnlyFiles(config serverConfig) error {
 
 	manifestPath := filepath.Join(config.dir, config.appendDirName, config.appendFilename+".manifest")
 	manifest := fmt.Sprintf("file %s seq 1 type i\n", config.appendFilename+".1.incr.aof")
-	return os.WriteFile(manifestPath, []byte(manifest), 0o644)
+	manifestFile, err := os.OpenFile(manifestPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return err
+	}
+	if _, err := manifestFile.WriteString(manifest); err != nil {
+		_ = manifestFile.Close()
+		return err
+	}
+	return manifestFile.Close()
 }
 
-func openActiveAOF(config serverConfig) (*os.File, error) {
+func activeAOFPath(config serverConfig) (string, error) {
 	if !strings.EqualFold(config.appendOnly, "yes") {
-		return nil, nil
+		return "", nil
 	}
 
 	manifestPath := filepath.Join(config.dir, config.appendDirName, config.appendFilename+".manifest")
 	manifest, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	var filename string
 	for _, line := range strings.Split(string(manifest), "\n") {
@@ -389,10 +403,99 @@ func openActiveAOF(config serverConfig) (*os.File, error) {
 		}
 	}
 	if filename == "" {
-		return nil, errors.New("manifest does not contain an incremental AOF file")
+		return "", errors.New("manifest does not contain an incremental AOF file")
 	}
-	path := filepath.Join(config.dir, config.appendDirName, filename)
+	return filepath.Join(config.dir, config.appendDirName, filename), nil
+}
+
+func openActiveAOF(config serverConfig) (*os.File, error) {
+	path, err := activeAOFPath(config)
+	if err != nil || path == "" {
+		return nil, err
+	}
 	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+}
+
+// replayAOF restores the in-memory dataset from the incremental AOF selected
+// by the manifest. It runs before activeAOF is opened, so replayed writes are
+// not appended to the file a second time.
+func replayAOF(config serverConfig, store map[string]redisValue) error {
+	if !strings.EqualFold(config.appendOnly, "yes") {
+		return nil
+	}
+
+	path, err := activeAOFPath(config)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	for commandNumber, position := 1, 0; position < len(data); commandNumber++ {
+		length, err := respCommandLength(data[position:])
+		if err != nil {
+			return fmt.Errorf("invalid AOF command %d: %w", commandNumber, err)
+		}
+		command := data[position : position+length]
+
+		if _, err := parseRESPCommand(command); err != nil {
+			return fmt.Errorf("invalid AOF command %d: %w", commandNumber, err)
+		}
+		response := execute(command, store)
+		if len(response) == 0 || response[0] == '-' {
+			return fmt.Errorf("AOF command %d failed: %q", commandNumber, response)
+		}
+		position += length
+	}
+	return nil
+}
+
+func respCommandLength(command []byte) (int, error) {
+	if len(command) < 4 || command[0] != '*' {
+		return 0, errors.New("command is not a RESP array")
+	}
+
+	lineEnd := bytes.Index(command, []byte("\r\n"))
+	if lineEnd == -1 {
+		return 0, errors.New("incomplete RESP array header")
+	}
+	count, err := strconv.Atoi(string(command[1:lineEnd]))
+	if err != nil || count < 1 {
+		return 0, errors.New("invalid RESP array length")
+	}
+
+	position := lineEnd + 2
+	for range count {
+		if position >= len(command) || command[position] != '$' {
+			return 0, errors.New("command argument is not a RESP bulk string")
+		}
+
+		argumentEnd := bytes.Index(command[position:], []byte("\r\n"))
+		if argumentEnd == -1 {
+			return 0, errors.New("incomplete RESP bulk string header")
+		}
+		argumentEnd += position
+		length, err := strconv.Atoi(string(command[position+1 : argumentEnd]))
+		if err != nil || length < 0 {
+			return 0, errors.New("invalid RESP bulk string length")
+		}
+
+		position = argumentEnd + 2
+		if length > len(command)-position {
+			return 0, errors.New("incomplete RESP bulk string")
+		}
+		end := position + length
+		if len(command)-end < 2 || !bytes.Equal(command[end:end+2], []byte("\r\n")) {
+			return 0, errors.New("incomplete RESP bulk string")
+		}
+		position = end + 2
+	}
+	return position, nil
 }
 
 func (config serverConfig) role() string {
