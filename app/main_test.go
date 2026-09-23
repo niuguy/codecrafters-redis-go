@@ -106,6 +106,23 @@ func TestParseServerConfig(t *testing.T) {
 	if custom.dir != "/tmp/redis-data" || custom.dbfilename != "redis.rdb" {
 		t.Fatalf("persistence config = %+v", custom)
 	}
+
+	aof, err := parseServerConfig([]string{
+		"--appendonly", "yes",
+		"--appenddirname", "aof-data",
+		"--appendfilename", "commands.aof",
+		"--appendfsync", "always",
+	})
+	if err != nil {
+		t.Fatalf("parse AOF config: %v", err)
+	}
+	if aof.appendOnly != "yes" || aof.appendDirName != "aof-data" || aof.appendFilename != "commands.aof" || aof.appendFsync != "always" {
+		t.Fatalf("AOF config = %+v", aof)
+	}
+
+	if _, err := parseServerConfig([]string{"--appendonly"}); err == nil {
+		t.Fatal("missing --appendonly value did not return an error")
+	}
 }
 
 func TestConfigGetCommand(t *testing.T) {
@@ -641,6 +658,52 @@ func TestAuthCommand(t *testing.T) {
 	if got := execute(testRESPCommand("AUTH", "default"), store); got[0] != '-' {
 		t.Fatalf("AUTH invalid arity response = %q", got)
 	}
+}
+
+func TestConnectionAuthenticationLifecycle(t *testing.T) {
+	previous := defaultACLUser
+	defaultACLUser = aclUserState{
+		nopass:    false,
+		passwords: []string{aclPasswordHash([]byte("newpassword"))},
+	}
+	defer func() { defaultACLUser = previous }()
+
+	events := make(chan commandEvent)
+	loopDone := make(chan struct{})
+	go func() {
+		runEventLoop(events)
+		close(loopDone)
+	}()
+
+	server, client := net.Pipe()
+	handlerDone := make(chan struct{})
+	go func() {
+		handleConn(server, events)
+		close(handlerDone)
+	}()
+
+	send := func(command, want []byte) {
+		t.Helper()
+		if _, err := client.Write(command); err != nil {
+			t.Fatalf("write command: %v", err)
+		}
+		got := make([]byte, len(want))
+		if _, err := io.ReadFull(client, got); err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("response = %q, want %q", got, want)
+		}
+	}
+
+	send(testRESPCommand("ACL", "WHOAMI"), []byte("-NOAUTH Authentication required.\r\n"))
+	send(testRESPCommand("AUTH", "default", "newpassword"), []byte("+OK\r\n"))
+	send(testRESPCommand("ACL", "WHOAMI"), []byte("$7\r\ndefault\r\n"))
+
+	_ = client.Close()
+	<-handlerDone
+	close(events)
+	<-loopDone
 }
 
 func TestSetBitCommand(t *testing.T) {

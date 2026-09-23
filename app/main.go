@@ -297,8 +297,32 @@ func parseServerConfig(arguments []string) (serverConfig, error) {
 			}
 			config.dbfilename = arguments[position+1]
 			position += 2
+		case "--appendonly":
+			if position+1 >= len(arguments) || strings.HasPrefix(arguments[position+1], "--") {
+				return serverConfig{}, errors.New("usage: your_program --appendonly <yes|no>")
+			}
+			config.appendOnly = arguments[position+1]
+			position += 2
+		case "--appenddirname":
+			if position+1 >= len(arguments) || strings.HasPrefix(arguments[position+1], "--") {
+				return serverConfig{}, errors.New("usage: your_program --appenddirname <name>")
+			}
+			config.appendDirName = arguments[position+1]
+			position += 2
+		case "--appendfilename":
+			if position+1 >= len(arguments) || strings.HasPrefix(arguments[position+1], "--") {
+				return serverConfig{}, errors.New("usage: your_program --appendfilename <name>")
+			}
+			config.appendFilename = arguments[position+1]
+			position += 2
+		case "--appendfsync":
+			if position+1 >= len(arguments) || strings.HasPrefix(arguments[position+1], "--") {
+				return serverConfig{}, errors.New("usage: your_program --appendfsync <policy>")
+			}
+			config.appendFsync = arguments[position+1]
+			position += 2
 		default:
-			return serverConfig{}, errors.New("usage: your_program [--port <port>] [--replicaof \"<host> <port>\"] [--dir <path>] [--dbfilename <filename>]")
+			return serverConfig{}, errors.New("usage: your_program [--port <port>] [--replicaof \"<host> <port>\"] [--dir <path>] [--dbfilename <filename>] [--appendonly <yes|no>] [--appenddirname <name>] [--appendfilename <name>] [--appendfsync <policy>]")
 		}
 	}
 	return config, nil
