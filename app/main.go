@@ -2592,6 +2592,8 @@ func executeACL(arguments [][]byte, username string) []byte {
 		return rawArrayResponse([][]byte{
 			bulkString([]byte("flags")),
 			arrayResponse([][]byte{[]byte("nopass")}),
+			bulkString([]byte("passwords")),
+			rawArrayResponse(nil),
 		})
 	}
 	return []byte("-ERR wrong number of arguments for 'acl' command\r\n")
