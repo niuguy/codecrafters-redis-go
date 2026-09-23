@@ -617,6 +617,32 @@ func TestACLSetUserPassword(t *testing.T) {
 	}
 }
 
+func TestAuthCommand(t *testing.T) {
+	previous := defaultACLUser
+	defaultACLUser = aclUserState{nopass: true}
+	defer func() { defaultACLUser = previous }()
+
+	store := make(map[string]redisValue)
+	if got := execute(testRESPCommand("AUTH", "default", "any-password"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("AUTH with nopass response = %q", got)
+	}
+	if got := execute(testRESPCommand("ACL", "SETUSER", "default", ">secret"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("ACL SETUSER response = %q", got)
+	}
+	if got := execute(testRESPCommand("AUTH", "default", "wrong"), store); got[0] != '-' {
+		t.Fatalf("AUTH wrong password response = %q", got)
+	}
+	if got := execute(testRESPCommand("AUTH", "default", "secret"), store); string(got) != "+OK\r\n" {
+		t.Fatalf("AUTH correct password response = %q", got)
+	}
+	if got := execute(testRESPCommand("AUTH", "missing", "secret"), store); got[0] != '-' {
+		t.Fatalf("AUTH unknown user response = %q", got)
+	}
+	if got := execute(testRESPCommand("AUTH", "default"), store); got[0] != '-' {
+		t.Fatalf("AUTH invalid arity response = %q", got)
+	}
+}
+
 func TestSetBitCommand(t *testing.T) {
 	store := make(map[string]redisValue)
 

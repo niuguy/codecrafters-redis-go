@@ -613,6 +613,14 @@ func runEventLoop(events chan commandEvent, initialStores ...map[string]redisVal
 				event.response <- executeACL(arguments, event.client.username)
 				continue
 			}
+			if isCommand(arguments[0], "AUTH") {
+				response := executeAuth(arguments)
+				if len(response) > 0 && response[0] == '+' {
+					event.client.username = string(arguments[1])
+				}
+				event.response <- response
+				continue
+			}
 		}
 		if err == nil && len(arguments) > 0 && isCommand(arguments[0], "BLPOP") {
 			handleBlockingPop(event, arguments, store, waiters, events)
@@ -1081,6 +1089,8 @@ func execute(command []byte, store map[string]redisValue, connectedReplicas ...i
 		return executeInfo(arguments, store)
 	case isCommand(arguments[0], "ACL"):
 		return executeACL(arguments, "default")
+	case isCommand(arguments[0], "AUTH"):
+		return executeAuth(arguments)
 	case isCommand(arguments[0], "REPLCONF"):
 		return executeReplConf(arguments)
 	case isCommand(arguments[0], "PSYNC"):
@@ -2621,8 +2631,7 @@ func executeACL(arguments [][]byte, username string) []byte {
 			if len(rule) < 2 || rule[0] != '>' {
 				return []byte("-ERR ACL SETUSER only supports password rules in this stage\r\n")
 			}
-			digest := sha256.Sum256(rule[1:])
-			hashes = append(hashes, hex.EncodeToString(digest[:]))
+			hashes = append(hashes, aclPasswordHash(rule[1:]))
 		}
 		for _, hash := range hashes {
 			found := false
@@ -2640,6 +2649,31 @@ func executeACL(arguments [][]byte, username string) []byte {
 		return []byte("+OK\r\n")
 	}
 	return []byte("-ERR wrong number of arguments for 'acl' command\r\n")
+}
+
+func executeAuth(arguments [][]byte) []byte {
+	if len(arguments) != 3 {
+		return []byte("-ERR wrong number of arguments for 'auth' command\r\n")
+	}
+	if string(arguments[1]) != "default" {
+		return []byte("-WRONGPASS invalid username-password pair or user is disabled.\r\n")
+	}
+	if defaultACLUser.nopass {
+		return []byte("+OK\r\n")
+	}
+
+	hash := aclPasswordHash(arguments[2])
+	for _, password := range defaultACLUser.passwords {
+		if password == hash {
+			return []byte("+OK\r\n")
+		}
+	}
+	return []byte("-WRONGPASS invalid username-password pair or user is disabled.\r\n")
+}
+
+func aclPasswordHash(password []byte) string {
+	digest := sha256.Sum256(password)
+	return hex.EncodeToString(digest[:])
 }
 
 func executeConfig(arguments [][]byte) []byte {
